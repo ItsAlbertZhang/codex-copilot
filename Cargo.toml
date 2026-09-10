@@ -1,0 +1,33 @@
+[package]
+name = "codex-copilot"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Wire an installed OpenAI Codex CLI to GitHub Copilot CAPI (ws:/responses) as a custom model provider."
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+# `preserve_order`: the model catalog is rewritten entry by entry and written
+# back out; a Codex models.json should not come back alphabetised.
+serde_json = { version = "1", features = ["preserve_order"] }
+# Parse-validation of the overlay we just wrote (`status`).
+toml = "0.9"
+
+[dependencies.reqwest]
+version = "0.12"
+default-features = false
+features = ["blocking", "json", "rustls-tls-native-roots"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
