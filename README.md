@@ -39,10 +39,10 @@ that sets the variable; you run it.
 
 ### Windows portable (no installer)
 
-Download a Windows zip from [GitHub Releases](https://github.com/ItsAlbertZhang/codex-copilot/releases)
+Download a Windows executable from [GitHub Releases](https://github.com/ItsAlbertZhang/codex-copilot/releases)
 when a release is available. Choose `windows-x64` for Intel/AMD PCs or
-`windows-arm64` for Windows on ARM. Extract it to a permanent folder and run
-the executable from PowerShell:
+`windows-arm64` for Windows on ARM. Put it in a permanent folder, rename it to
+`codex-copilot.exe` if you like, and run it from PowerShell:
 
 ```powershell
 .\codex-copilot.exe --help
@@ -52,8 +52,8 @@ the executable from PowerShell:
 codex --profile copilot
 ```
 
-Each zip ships a matching `.sha256` file. Verify the download with
-`Get-FileHash .\codex-copilot-1.0.0-windows-x64.zip -Algorithm SHA256` and
+Each executable ships a matching `.sha256` file beside it. Verify the download
+with `Get-FileHash .\codex-copilot-1.0.0-windows-x64.exe -Algorithm SHA256` and
 compare the hash with the one in that file.
 
 The exe is self-contained and can be copied on its own. Keep it for later use;
@@ -75,7 +75,7 @@ From a local checkout, use `cargo install --path . --locked`. Re-run the git
 command to update. This checkout disables crates.io publishing with
 `publish = false`; use the git or local-path command above.
 
-### Build a portable Windows zip
+### Build a portable Windows executable
 
 From the repository root, using Windows PowerShell or PowerShell 7:
 
@@ -87,17 +87,18 @@ rustup target add x86_64-pc-windows-msvc
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc
 ```
 
-The script links the MSVC runtime statically and writes an exe, zip, and
-SHA-256 checksum under `dist/`. It uses `Cargo.lock` and keeps its build files
-under `target/portable/`. For ARM64, use `aarch64-pc-windows-msvc`.
+The script links the MSVC runtime statically and writes two files under
+`dist/`: `codex-copilot-<version>-windows-<arch>.exe` and a matching
+`.exe.sha256` checksum. It uses `Cargo.lock` and keeps its build files under
+`target/portable/`. For ARM64, use `aarch64-pc-windows-msvc`.
 `-ExecutionPolicy Bypass` applies only to this PowerShell process and does not
 change the machine's execution policy.
 
 The **portable-release** GitHub Actions workflow builds both Windows targets.
-Run it manually to download the packages from the workflow's artifacts, or
+Run it manually to download the executables from the workflow's artifacts, or
 push a tag matching the Cargo version (for example `v1.0.0`) to create a draft
-GitHub Release with both zips and checksums. Review and publish the draft to
-make the downloads public.
+GitHub Release with both executables and checksums. Review and publish the draft
+to make the downloads public.
 
 ## Install
 

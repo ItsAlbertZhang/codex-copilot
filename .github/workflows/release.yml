@@ -39,7 +39,7 @@ jobs:
           if ($env:GITHUB_REF_NAME -ne "v$version") {
             throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version."
           }
-      - name: Build portable archive
+      - name: Build portable executable
         shell: pwsh
         run: ./scripts/package-windows.ps1 -Target '${{ matrix.target }}'
       - name: Test release binary (native x64)
@@ -48,26 +48,21 @@ jobs:
         env:
           RUSTFLAGS: '-C target-feature=+crt-static'
         run: cargo test --locked --release --target '${{ matrix.target }}' --target-dir target/portable
-      - name: Smoke test extracted archive (native x64)
+      - name: Smoke test portable executable (native x64)
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
-          $archive = Get-ChildItem dist/*.zip | Select-Object -First 1
-          $destination = Join-Path $env:RUNNER_TEMP 'portable smoke'
-          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
-          Push-Location -LiteralPath $destination
-          try {
-            & ./codex-copilot.exe --version
-            if ($LASTEXITCODE -ne 0) { throw 'Portable version check failed.' }
-            & ./codex-copilot.exe --help
-            if ($LASTEXITCODE -ne 0) { throw 'Portable help check failed.' }
-          } finally { Pop-Location }
+          $exe = Get-ChildItem dist/*.exe | Select-Object -First 1
+          & $exe.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw 'Portable version check failed.' }
+          & $exe.FullName --help
+          if ($LASTEXITCODE -ne 0) { throw 'Portable help check failed.' }
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ matrix.target }}
           path: |
-            dist/*.zip
-            dist/*.sha256
+            dist/*.exe
+            dist/*.exe.sha256
           if-no-files-found: error
 
   release:
@@ -88,5 +83,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: >-
-          gh release create "$RELEASE_TAG" dist/*.zip dist/*.sha256
+          gh release create "$RELEASE_TAG" dist/*.exe dist/*.exe.sha256
           --draft --verify-tag --title "$RELEASE_TAG" --generate-notes

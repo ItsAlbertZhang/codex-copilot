@@ -51,47 +51,16 @@ try {
         throw ('Built {0} has PE machine 0x{1:X4}, expected 0x{2:X4} for {3}.' -f $executable, $machine, $expectedMachine, $Target)
     }
 
-    $artifactName = "codex-copilot-$($package.version)-windows-$architecture"
+    $artifactName = "codex-copilot-$($package.version)-windows-$architecture.exe"
     $distRoot = Join-Path $projectRoot 'dist'
-    $stage = Join-Path $distRoot $artifactName
-    New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    Copy-Item -LiteralPath $executable -Destination $stage
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md'), (Join-Path $projectRoot 'LICENSE') -Destination $stage
+    New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
+    $artifact = Join-Path $distRoot $artifactName
+    Copy-Item -LiteralPath $executable -Destination $artifact -Force
 
-    $quickStart = @'
-codex-copilot - Windows portable edition
-
-Extract the zip to a folder you want to keep. Open PowerShell in that folder:
-
-  .\codex-copilot.exe --help
-  .\codex-copilot.exe login
-
-Follow the login output to set COPILOT_GITHUB_TOKEN, then open a new terminal:
-
-  .\codex-copilot.exe install
-  codex --profile copilot
-
-No Rust toolchain or Visual C++ Redistributable installation is needed to run
-this executable. An installed Codex CLI and a GitHub Copilot seat are still
-required. This is a command-line application; run it from a terminal.
-
-The install command configures the Codex profile. It does not install this exe.
-Keep the exe and reuse it for login, install, status, or uninstall. It writes
-the profile under CODEX_HOME (normally ~/.codex), not beside the executable.
-Optionally add this folder to PATH to run codex-copilot from any directory.
-
-See README.md for all options and details about tokens and configuration.
-'@
-    $quickStart | Set-Content -LiteralPath (Join-Path $stage 'QUICKSTART.txt') -Encoding UTF8
-
-    $archive = Join-Path $distRoot "$artifactName.zip"
-    $files = @('codex-copilot.exe', 'README.md', 'LICENSE', 'QUICKSTART.txt') |
-        ForEach-Object { Join-Path $stage $_ }
-    Compress-Archive -LiteralPath $files -DestinationPath $archive -Force
-    $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$hash  $artifactName.zip" | Set-Content -LiteralPath "$archive.sha256" -Encoding ASCII
-    Write-Output "Portable executable: $(Join-Path $stage 'codex-copilot.exe')"
-    Write-Output "Archive: $archive"
+    $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Write the line with a bare LF and no BOM: 'sha256sum -c' rejects CRLF.
+    [System.IO.File]::WriteAllText("$artifact.sha256", "$hash  $artifactName`n")
+    Write-Output "Portable executable: $artifact"
     Write-Output "SHA256: $hash"
 }
 finally {
