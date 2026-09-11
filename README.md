@@ -31,7 +31,69 @@ that sets the variable; you run it.
   must list it with `policy.state == enabled` and `ws:/responses` among its
   `supported_endpoints`. `install` warns (with the remedy) rather than aborting
   if it is not, so the rest of the setup still lands.
-- Build from source: Rust 1.88+, `cargo build --release`.
+- Only when building from source: Rust 1.88+ (plus the Visual C++ build tools on
+  Windows). The portable executable needs neither Rust nor a separate Visual
+  C++ Redistributable installation.
+
+## Get the executable
+
+### Windows portable (no installer)
+
+Download a Windows zip from [GitHub Releases](https://github.com/ItsLucas/codex-copilot/releases)
+when a release is available. Choose `windows-x64` for Intel/AMD PCs or
+`windows-arm64` for Windows on ARM. Extract it to a permanent folder and run
+the executable from PowerShell:
+
+```powershell
+.\codex-copilot.exe --help
+.\codex-copilot.exe login
+# After setting the token as instructed and opening a new terminal:
+.\codex-copilot.exe install
+codex --profile copilot
+```
+
+The exe is self-contained and can be copied on its own. Keep it for later use;
+optionally add its folder to PATH so `codex-copilot` works from anywhere.
+The `install` subcommand configures the Codex profile; it does not install the
+executable. Profile data still lives under `$CODEX_HOME` (normally `~/.codex`).
+Codex CLI and a Copilot seat are still required.
+
+### Cargo (Windows, macOS, Linux)
+
+Install once from this repository; Cargo places the executable in its bin
+directory (normally `~/.cargo/bin`):
+
+```console
+cargo install --git https://github.com/ItsLucas/codex-copilot.git --locked codex-copilot
+```
+
+From a local checkout, use `cargo install --path . --locked`. Re-run the git
+command to update. This checkout disables crates.io publishing with
+`publish = false`; use the git or local-path command above.
+
+### Build a portable Windows zip
+
+From the repository root, using Windows PowerShell or PowerShell 7:
+
+```powershell
+# Defaults to the current Rust host architecture:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+# Or select a target (matching Visual C++ tools must also be installed):
+rustup target add x86_64-pc-windows-msvc
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc
+```
+
+The script links the MSVC runtime statically and writes an exe, zip, and
+SHA-256 checksum under `dist/`. It uses `Cargo.lock` and keeps its build files
+under `target/portable/`. For ARM64, use `aarch64-pc-windows-msvc`.
+`-ExecutionPolicy Bypass` applies only to this PowerShell process and does not
+change the machine's execution policy.
+
+The **portable-release** GitHub Actions workflow builds both Windows targets.
+Run it manually to download the packages from the workflow's artifacts, or
+push a tag matching the Cargo version (for example `v1.0.0`) to create a draft
+GitHub Release with both zips and checksums. Review and publish the draft to
+make the downloads public.
 
 ## Install
 

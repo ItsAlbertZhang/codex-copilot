@@ -1,0 +1,87 @@
+name: portable-release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.target }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check release version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed.' }
+          $version = ($metadata.packages | Where-Object name -EQ 'codex-copilot').version
+          if ($env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version."
+          }
+      - name: Build portable archive
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Target '${{ matrix.target }}'
+      - name: Test release binary (native x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          RUSTFLAGS: '-C target-feature=+crt-static'
+        run: cargo test --locked --release --target '${{ matrix.target }}' --target-dir target/portable
+      - name: Smoke test extracted archive (native x64)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem dist/*.zip | Select-Object -First 1
+          $destination = Join-Path $env:RUNNER_TEMP 'portable smoke'
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath $destination
+          Push-Location -LiteralPath $destination
+          try {
+            & ./codex-copilot.exe --version
+            if ($LASTEXITCODE -ne 0) { throw 'Portable version check failed.' }
+            & ./codex-copilot.exe --help
+            if ($LASTEXITCODE -ne 0) { throw 'Portable help check failed.' }
+          } finally { Pop-Location }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: windows-*
+          merge-multiple: true
+          path: dist
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$RELEASE_TAG" dist/*.zip dist/*.sha256
+          --draft --verify-tag --title "$RELEASE_TAG" --generate-notes
