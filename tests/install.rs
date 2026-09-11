@@ -174,6 +174,7 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
         // The token is echoed once, with the one-liner the user runs.
         .has(&format!("COPILOT_GITHUB_TOKEN={TOKEN}"))
         .has("SetEnvironmentVariable")
+        .has("Auto-review  gpt-5.6-luna")
         .has("codex --profile copilot");
 
     let text = overlay(home.path());
@@ -185,8 +186,8 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
 
     // Calibration: the seat allows astra 872k, the bundled catalog said 272k.
     let config: toml::Value = toml::from_str(&text).unwrap();
-    // Skipping setup leaves reviewer selection and approval policy inherited.
-    assert!(config.get("approvals_reviewer").is_none());
+    // The default reviewer is routed; no other approval key is written.
+    assert_eq!(config["approvals_reviewer"].as_str(), Some("auto_review"));
     assert!(config.get("approval_policy").is_none());
     assert!(config.get("sandbox_mode").is_none());
     assert_eq!(
@@ -202,13 +203,16 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
     assert_eq!(astra["max_context_window"], 872_000);
     assert_eq!(astra["auto_compact_token_limit"], 784_800);
     assert_eq!(astra["tool_mode"], "code_mode_only");
+    assert_eq!(astra["auto_review_model_override"], "gpt-5.6-luna");
     // gpt-5.2 is not on this seat, so it keeps what codex shipped.
     assert_eq!(cat["models"][3]["slug"], "gpt-5.2");
     assert_eq!(cat["models"][3]["context_window"], 272_000);
+    assert!(cat["models"][3]["auto_review_model_override"].is_null());
 
     let state = read_json(&home.path().join("copilot_config_toml/state.json"));
     assert_eq!(state["host"], stub.host());
     assert_eq!(state["model"], "gpt-6-astra");
+    assert_eq!(state["auto_review_model"], "gpt-5.6-luna");
     assert_eq!(state["codex_version"], CODEX_VERSION);
     assert_eq!(state["models"][0]["capi_max"], 872_000);
     assert_eq!(state["models"][0]["tier_base"], 272_000);
@@ -217,11 +221,23 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
     assert!(!raw.contains(TOKEN) && !raw.contains("login"));
 }
 
+/// No reviewer routed: not in the overlay, not in the catalog, not in state.
+fn assert_no_review(home: &Path) {
+    let config: toml::Value = toml::from_str(&overlay(home)).unwrap();
+    assert!(config.get("approvals_reviewer").is_none());
+    for entry in catalog(home)["models"].as_array().unwrap() {
+        assert!(entry["auto_review_model_override"].is_null(), "{entry}");
+    }
+    let state = read_json(&home.join("copilot_config_toml/state.json"));
+    assert!(state["auto_review_model"].is_null());
+}
+
 #[test]
 fn auto_review_selects_a_real_model_and_preserves_catalog_policy() {
     let home = TempDir::new().unwrap();
     let stub = Stub::start(&[]);
-    install(home.path(), &stub, &[]).ok();
+    install(home.path(), &stub, &["--no-auto-review"]).ok();
+    assert_no_review(home.path());
     let before = catalog(home.path());
     install(home.path(), &stub, &["--auto-review-model", "gpt-5.5"])
         .ok()
@@ -257,15 +273,14 @@ fn auto_review_selects_a_real_model_and_preserves_catalog_policy() {
         .ok()
         .has("review route FAIL");
 
-    // Reinstalling without opt-in restores inheritance and the original catalog.
-    install(home.path(), &stub, &[]).ok();
-    let config: toml::Value = toml::from_str(&overlay(home.path())).unwrap();
-    assert!(config.get("approvals_reviewer").is_none());
+    // --no-auto-review restores inheritance and the original catalog bytes.
+    install(home.path(), &stub, &["--no-auto-review"]).ok();
+    assert_no_review(home.path());
     assert_eq!(catalog(home.path()), before);
 }
 
 #[test]
-fn unusable_review_models_fail_before_changing_an_installation() {
+fn an_unusable_reviewer_warns_and_installs_without_the_override() {
     for (stub_args, reviewer, message) in [
         (vec![], "codex-auto-review", "not served"),
         (
@@ -274,32 +289,18 @@ fn unusable_review_models_fail_before_changing_an_installation() {
             "must be enabled",
         ),
         (vec!["--no-ws"], "gpt-6-astra", "support ws:/responses"),
-        (
-            vec!["--model", "unknown"],
-            "unknown",
-            "both CAPI and the Codex catalog",
-        ),
     ] {
         let home = TempDir::new().unwrap();
         let stub = Stub::start(&stub_args);
-        install(home.path(), &stub, &[]).ok();
-        let before = overlay(home.path());
-        let before_catalog = catalog(home.path());
-        let before_state = read_json(&home.path().join("copilot_config_toml/state.json"));
         install(home.path(), &stub, &["--auto-review-model", reviewer])
-            .failed()
-            .has(message);
-        assert_eq!(overlay(home.path()), before);
-        assert_eq!(catalog(home.path()), before_catalog);
-        assert_eq!(
-            read_json(&home.path().join("copilot_config_toml/state.json")),
-            before_state
-        );
+            .ok()
+            .has("WARNING  auto review disabled")
+            .has(message)
+            .has("--no-auto-review");
+        assert_no_review(home.path());
     }
-}
 
-#[test]
-fn auto_review_rejects_catalogs_without_the_native_override_field() {
+    // A catalog predating Codex's native override field cannot route either.
     let home = TempDir::new().unwrap();
     let stub = Stub::start(&[]);
     let old_catalog = home.path().join("old-catalog.json");
@@ -314,9 +315,9 @@ fn auto_review_rejects_catalogs_without_the_native_override_field() {
             "gpt-6-astra",
         ],
     )
-    .failed()
+    .ok()
     .has("lacks auto_review_model_override");
-    assert!(!home.path().join("copilot.config.toml").exists());
+    assert_no_review(home.path());
 }
 
 #[test]
@@ -519,8 +520,14 @@ fn an_unusable_model_warns_with_a_remedy() {
 
     let home2 = TempDir::new().unwrap();
     let stub = Stub::start(&[]);
+    // An unusable conversation model does not stop the reviewer being routed.
     install(home2.path(), &stub, &["--model", "gpt-9-nope"])
         .ok()
         .has("is not in")
-        .has("--model");
+        .has("--model")
+        .has("Auto-review  gpt-5.6-luna");
+    let config: toml::Value = toml::from_str(&overlay(home2.path())).unwrap();
+    assert_eq!(config["approvals_reviewer"].as_str(), Some("auto_review"));
+    let state = read_json(&home2.path().join("copilot_config_toml/state.json"));
+    assert_eq!(state["auto_review_model"], "gpt-5.6-luna");
 }

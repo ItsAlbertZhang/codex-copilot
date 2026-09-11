@@ -2,7 +2,6 @@
 //! meet.
 
 use std::fs;
-use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{self, Row};
 use crate::codex::CodexBin;
-use crate::{auth, capi, overlay, setup, AuthArgs, InstallArgs, TOKEN_ENV};
+use crate::{auth, capi, overlay, AuthArgs, InstallArgs, TOKEN_ENV};
 
 /// What every command needs to know about where it is operating.
 #[derive(Debug)]
@@ -204,21 +203,19 @@ pub fn install(ctx: &Ctx, args: &InstallArgs) -> Result<()> {
 
     // --- the model we are about to write ----------------------------------
     check_model(&args.model, &facts, &host);
-    let auto_review_model = if let Some(model) = &args.auto_review_model {
-        Some(model.clone())
-    } else if args.skip_auto_review || args.auth.token_stdin || !io::stdin().is_terminal() {
-        None
-    } else {
-        let candidates = catalog::auto_review_candidates(&calibrated, &facts, &args.model)?;
-        setup::choose_auto_review(
-            &mut io::stdin().lock(),
-            &mut io::stdout().lock(),
-            &candidates,
-        )?
-    };
-    if let Some(reviewer) = &auto_review_model {
-        let count = catalog::configure_auto_review(&mut calibrated, &facts, &args.model, reviewer)?;
-        println!("Auto-review  {reviewer}  (native override for {count} catalog entries)");
+    let mut auto_review_model = None;
+    if !args.no_auto_review {
+        let reviewer = &args.auto_review_model;
+        match catalog::configure_auto_review(&mut calibrated, &facts, reviewer) {
+            Ok(count) => {
+                println!("Auto-review  {reviewer}  (native override for {count} catalog entries)");
+                auto_review_model = Some(reviewer.clone());
+            }
+            Err(e) => println!(
+                "\nWARNING  auto review disabled: {e:#}. Pick another with \
+                 --auto-review-model <slug>, or pass --no-auto-review."
+            ),
+        }
     }
 
     // --- write ------------------------------------------------------------

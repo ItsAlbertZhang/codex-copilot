@@ -303,14 +303,13 @@ fn read_u64(obj: &Map<String, Value>, key: &str) -> Option<u64> {
 pub fn configure_auto_review(
     catalog: &mut Calibrated,
     facts: &Facts,
-    main_model: &str,
     reviewer: &str,
 ) -> Result<usize> {
     let mut doc: Value = serde_json::from_str(&catalog.json)?;
     let models = doc["models"]
         .as_array_mut()
         .context("catalog has no models")?;
-    validate_auto_review(models, facts, main_model, reviewer)?;
+    validate_auto_review(models, facts, reviewer)?;
     let mut count = 0;
     for model in models {
         if model["slug"]
@@ -325,41 +324,18 @@ pub fn configure_auto_review(
     Ok(count)
 }
 
-/// Candidates for setup use exactly the validation applied to explicit IDs.
-pub fn auto_review_candidates(
-    catalog: &Calibrated,
-    facts: &Facts,
-    main_model: &str,
-) -> Result<Vec<String>> {
-    let doc: Value = serde_json::from_str(&catalog.json)?;
-    let models = doc["models"].as_array().context("catalog has no models")?;
-    Ok(models
-        .iter()
-        .filter_map(|m| m["slug"].as_str())
-        .filter(|slug| validate_auto_review(models, facts, main_model, slug).is_ok())
-        .map(str::to_string)
-        .collect())
-}
-
-fn validate_auto_review(
-    models: &[Value],
-    facts: &Facts,
-    main_model: &str,
-    reviewer: &str,
-) -> Result<()> {
-    let fact = facts.get(reviewer).with_context(|| {
-        format!("--auto-review-model {reviewer}: model is not served on this CAPI seat")
-    })?;
+fn validate_auto_review(models: &[Value], facts: &Facts, reviewer: &str) -> Result<()> {
+    let fact = facts
+        .get(reviewer)
+        .with_context(|| format!("{reviewer} is not served on this CAPI seat"))?;
     anyhow::ensure!(
         fact.policy_ok() && fact.ws,
-        "--auto-review-model {reviewer}: model must be enabled and support ws:/responses"
+        "{reviewer} must be enabled and support ws:/responses"
     );
-    for slug in [main_model, reviewer] {
-        anyhow::ensure!(
-            facts.contains_key(slug) && models.iter().any(|m| m["slug"].as_str() == Some(slug)),
-            "--auto-review-model: {slug} must be present in both CAPI and the Codex catalog"
-        );
-    }
+    anyhow::ensure!(
+        models.iter().any(|m| m["slug"].as_str() == Some(reviewer)),
+        "{reviewer} is not in the Codex catalog"
+    );
     for model in models {
         let Some(slug) = model["slug"].as_str() else {
             continue;
@@ -369,8 +345,8 @@ fn validate_auto_review(
         }
         anyhow::ensure!(
             model.get("auto_review_model_override").is_some(),
-            "--auto-review-model: catalog entry {slug} lacks auto_review_model_override; \
-             update Codex and use its matching bundled catalog"
+            "catalog entry {slug} lacks auto_review_model_override; update Codex and use its \
+             matching bundled catalog"
         );
     }
     Ok(())
