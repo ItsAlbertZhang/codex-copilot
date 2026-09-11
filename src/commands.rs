@@ -56,9 +56,10 @@ impl Ctx {
         self.codex_home
             .join(format!("{}.config.toml", self.profile))
     }
-    /// `$CODEX_HOME/codex-copilot/<profile>/`.
+    /// `$CODEX_HOME/<profile>_config_toml/`.
     pub fn dir(&self) -> PathBuf {
-        self.codex_home.join("codex-copilot").join(&self.profile)
+        self.codex_home
+            .join(format!("{}_config_toml", self.profile))
     }
     pub fn catalog_path(&self) -> PathBuf {
         self.dir().join("models-catalog.json")
@@ -467,7 +468,6 @@ pub fn uninstall(ctx: &Ctx) -> Result<()> {
     if !ctx.dry_run && dir.exists() {
         // Only if empty: a file we did not write is a file we do not delete.
         let _ = fs::remove_dir(&dir);
-        let _ = fs::remove_dir(dir.parent().unwrap_or(&dir));
     }
 
     if removed.is_empty() {
@@ -537,7 +537,7 @@ mod tests {
     fn paths_are_derived_from_the_profile_name() {
         let c = ctx(Path::new("/home/.codex"));
         assert!(c.overlay_path().ends_with("copilot.config.toml"));
-        assert!(c.dir().ends_with(Path::new("codex-copilot/copilot")));
+        assert!(c.dir().ends_with("copilot_config_toml"));
         assert!(c.catalog_path().ends_with("models-catalog.json"));
         assert!(c.state_path().ends_with("state.json"));
     }

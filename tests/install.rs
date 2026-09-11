@@ -143,7 +143,7 @@ fn overlay(home: &Path) -> String {
 }
 
 fn catalog(home: &Path) -> Value {
-    read_json(&home.join("codex-copilot/copilot/models-catalog.json"))
+    read_json(&home.join("copilot_config_toml/models-catalog.json"))
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn dry_run_prints_the_overlay_and_writes_nothing() {
         .has("wire_api = \"responses\"")
         .has("supports_websockets = true");
     assert!(!home.path().join("copilot.config.toml").exists());
-    assert!(!home.path().join("codex-copilot").exists());
+    assert!(!home.path().join("copilot_config_toml").exists());
 }
 
 #[test]
@@ -196,15 +196,14 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
     assert_eq!(cat["models"][3]["slug"], "gpt-5.2");
     assert_eq!(cat["models"][3]["context_window"], 272_000);
 
-    let state = read_json(&home.path().join("codex-copilot/copilot/state.json"));
+    let state = read_json(&home.path().join("copilot_config_toml/state.json"));
     assert_eq!(state["host"], stub.host());
     assert_eq!(state["model"], "gpt-6-astra");
     assert_eq!(state["codex_version"], CODEX_VERSION);
     assert_eq!(state["models"][0]["capi_max"], 872_000);
     assert_eq!(state["models"][0]["tier_base"], 272_000);
     // No secret ever reaches state.json.
-    let raw =
-        std::fs::read_to_string(home.path().join("codex-copilot/copilot/state.json")).unwrap();
+    let raw = std::fs::read_to_string(home.path().join("copilot_config_toml/state.json")).unwrap();
     assert!(!raw.contains(TOKEN) && !raw.contains("login"));
 }
 
@@ -389,11 +388,8 @@ fn uninstall_removes_the_files_and_only_prints_the_unset_line() {
         .has("$null")
         .has("this tool never set it");
     assert!(!home.path().join("copilot.config.toml").exists());
-    assert!(!home
-        .path()
-        .join("codex-copilot/copilot/state.json")
-        .exists());
-    assert!(!home.path().join("codex-copilot").exists());
+    assert!(!home.path().join("copilot_config_toml/state.json").exists());
+    assert!(!home.path().join("copilot_config_toml").exists());
 
     run(home.path(), &["uninstall"])
         .ok()

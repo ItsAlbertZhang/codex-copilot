@@ -66,8 +66,8 @@ with your `codex --version`, calibrates it, and writes the profile. Add
 | Path | What |
 | --- | --- |
 | `$CODEX_HOME/copilot.config.toml` | the overlay Codex layers on `config.toml` when `--profile copilot` is passed |
-| `$CODEX_HOME/codex-copilot/copilot/models-catalog.json` | the calibrated catalog (`model_catalog_json`) |
-| `$CODEX_HOME/codex-copilot/copilot/state.json` | host, model, codex version, calibration table, timestamp - no secrets |
+| `$CODEX_HOME/copilot_config_toml/models-catalog.json` | the calibrated catalog (`model_catalog_json`) |
+| `$CODEX_HOME/copilot_config_toml/state.json` | host, model, codex version, calibration table, timestamp - no secrets |
 
 Nothing else on the machine changes: not `config.toml`, not the credential
 store, not your environment variables.

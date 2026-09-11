@@ -125,7 +125,7 @@ mod tests {
     use toml::Value;
 
     fn rendered() -> (String, Value) {
-        let path = PathBuf::from(r"C:\Users\x\.codex\codex-copilot\copilot\models-catalog.json");
+        let path = PathBuf::from(r"C:\Users\x\.codex\copilot_config_toml\models-catalog.json");
         let text = render(&Params {
             profile: "copilot",
             model: "gpt-6-astra",
@@ -222,7 +222,7 @@ mod tests {
         );
         assert_eq!(
             doc["model_catalog_json"].as_str(),
-            Some(r"C:\Users\x\.codex\codex-copilot\copilot\models-catalog.json")
+            Some(r"C:\Users\x\.codex\copilot_config_toml\models-catalog.json")
         );
     }
 
