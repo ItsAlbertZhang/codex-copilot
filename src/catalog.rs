@@ -297,6 +297,61 @@ fn read_u64(obj: &Map<String, Value>, key: &str) -> Option<u64> {
     obj.get(key).and_then(Value::as_u64)
 }
 
+/// Select a real CAPI reviewer via Codex's native per-model override. Leave
+/// slugs, model messages (including Guardian policy), and unserved entries alone.
+/// Validate before replacing `catalog.json`, so failures cannot partially apply.
+pub fn configure_auto_review(
+    catalog: &mut Calibrated,
+    facts: &Facts,
+    reviewer: &str,
+) -> Result<usize> {
+    let mut doc: Value = serde_json::from_str(&catalog.json)?;
+    let models = doc["models"]
+        .as_array_mut()
+        .context("catalog has no models")?;
+    validate_auto_review(models, facts, reviewer)?;
+    let mut count = 0;
+    for model in models {
+        if model["slug"]
+            .as_str()
+            .is_some_and(|slug| facts.contains_key(slug))
+        {
+            model["auto_review_model_override"] = Value::from(reviewer);
+            count += 1;
+        }
+    }
+    catalog.json = serde_json::to_string_pretty(&doc)? + "\n";
+    Ok(count)
+}
+
+fn validate_auto_review(models: &[Value], facts: &Facts, reviewer: &str) -> Result<()> {
+    let fact = facts
+        .get(reviewer)
+        .with_context(|| format!("{reviewer} is not served on this CAPI seat"))?;
+    anyhow::ensure!(
+        fact.policy_ok() && fact.ws,
+        "{reviewer} must be enabled and support ws:/responses"
+    );
+    anyhow::ensure!(
+        models.iter().any(|m| m["slug"].as_str() == Some(reviewer)),
+        "{reviewer} is not in the Codex catalog"
+    );
+    for model in models {
+        let Some(slug) = model["slug"].as_str() else {
+            continue;
+        };
+        if !facts.contains_key(slug) {
+            continue;
+        }
+        anyhow::ensure!(
+            model.get("auto_review_model_override").is_some(),
+            "catalog entry {slug} lacks auto_review_model_override; update Codex and use its \
+             matching bundled catalog"
+        );
+    }
+    Ok(())
+}
+
 fn write_entry(obj: &mut Map<String, Value>, window: u64, max: u64, compact: u64) {
     obj.insert("context_window".into(), Value::from(window));
     obj.insert("max_context_window".into(), Value::from(max));

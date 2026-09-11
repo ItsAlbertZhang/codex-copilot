@@ -75,7 +75,7 @@ with your `codex --version`, calibrates it, and writes the profile. Add
 | --- | --- |
 | `$CODEX_HOME/copilot.config.toml` | the overlay Codex layers on `config.toml` when `--profile copilot` is passed |
 | `$CODEX_HOME/copilot_config_toml/models-catalog.json` | the calibrated catalog (`model_catalog_json`) |
-| `$CODEX_HOME/copilot_config_toml/state.json` | host, model, codex version, calibration table, timestamp - no secrets |
+| `$CODEX_HOME/copilot_config_toml/state.json` | host, model, reviewer, codex version, calibration table, timestamp - no secrets |
 
 Nothing else on the machine changes: not `config.toml`, not the credential
 store, not your environment variables.
@@ -97,6 +97,22 @@ vs catalog version, `GET /models`, the model's policy and `ws:/responses`,
 overlay and catalog parse). `codex doctor` is not profile-aware, so the real
 end-to-end check is to start `codex --profile copilot` and send one short
 message.
+
+## Approval review
+
+`install` points Codex's automatic approval review at a real CAPI model, and
+never prompts: `gpt-5.6-luna` by default, `--auto-review-model <ID>` for
+another, `--no-auto-review` to configure none and inherit `config.toml`'s.
+
+It writes `approvals_reviewer = "auto_review"` in the overlay and
+`"auto_review_model_override": "<ID>"` into every CAPI-served catalog entry, so
+switching conversation models keeps the reviewer - that is
+[Codex's own model selection](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/guardian/review.rs#L872),
+not an alias or a proxy. Slugs, Guardian messages and approval settings stay.
+
+A reviewer missing from CAPI or the catalog, disabled, or without
+`ws:/responses` warns and is skipped; the rest of the install still lands.
+`status` checks the saved override and the reviewer's own policy.
 
 ## Per-model calibration
 
@@ -144,6 +160,7 @@ it by hand and pass `--catalog <path>`.
   with the stock responses-lite catalog). It is also what warms the WebSocket
   the whole session then rides, so shortening
   `websocket_connect_timeout_ms` throws away a request you already paid for.
+- Reviewer inference consumes additional CAPI usage.
 - `install` and `status` cost nothing: `GET /models` is not a billed endpoint.
 
 ## Security

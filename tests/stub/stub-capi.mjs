@@ -38,11 +38,13 @@ const CATALOG_STATUS = Number(args['catalog-status'] ?? 200);
 
 // (id, standard tier ceiling, long-context ceiling or null, hard ceiling) taken
 // from a real Enterprise seat: astra 272k/872k, 5.5 272k/922k, and 5.4-mini
-// with no long-context tier at all.
+// with no long-context tier at all. gpt-5.6-luna is the default reviewer, so
+// the seat serves it too.
 const CAPI_MODELS = [
   ['gpt-6-astra', 272000, 872000, 1000000],
   ['gpt-5.5', 272000, 922000, 1050000],
   ['gpt-5.4-mini', 272000, null, 400000],
+  ['gpt-5.6-luna', 272000, null, 400000],
 ];
 
 function entry(id, base, long, hardMax, endpoints, policy) {
@@ -92,6 +94,8 @@ function bundledCatalog() {
     context_window: ctx,
     max_context_window: max,
     auto_compact_token_limit: null,
+    auto_review_model_override: null,
+    model_messages: { auto_review: { policy: 'fixture policy: preserve unchanged' } },
     prefer_websockets: true,
     ...extra,
   });
@@ -101,6 +105,7 @@ function bundledCatalog() {
       m('gpt-5.5', 272000, 272000),
       m('gpt-5.4-mini', 272000, 272000),
       m('gpt-5.2', 272000, 272000),
+      m('gpt-5.6-luna', 272000, 272000),
     ],
   };
 }

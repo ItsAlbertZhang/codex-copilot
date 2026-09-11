@@ -15,6 +15,7 @@ mod capi;
 mod catalog;
 mod codex;
 mod commands;
+mod defaults;
 mod overlay;
 
 use std::path::PathBuf;
@@ -22,13 +23,14 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+use crate::defaults::{DEFAULT_AUTO_REVIEW, DEFAULT_MODEL};
+
 /// The variable Codex reads the CAPI bearer from (`env_key` in the overlay).
 /// The user owns it: nothing here ever writes it.
 pub const TOKEN_ENV: &str = "COPILOT_GITHUB_TOKEN";
 /// `model_provider` id, and the `[model_providers.<id>]` table name.
 pub const PROVIDER_ID: &str = "copilot";
 
-const DEFAULT_MODEL: &str = "gpt-6-astra";
 const DEFAULT_WINDOW: &str = "max";
 
 #[derive(Parser, Debug)]
@@ -110,6 +112,14 @@ pub struct InstallArgs {
     #[arg(long, value_name = "ID", default_value = DEFAULT_MODEL)]
     pub model: String,
 
+    /// Model that answers Codex's automatic approval reviews.
+    #[arg(long, value_name = "ID", default_value = DEFAULT_AUTO_REVIEW)]
+    pub auto_review_model: String,
+
+    /// Configure no reviewer; inherit Codex's own approval review setting.
+    #[arg(long, conflicts_with = "auto_review_model")]
+    pub no_auto_review: bool,
+
     /// Window every calibrated model is budgeted against: `max` (everything
     /// CAPI accepts, billed ~2x above the base tier), `base` (the
     /// standard-price tier), or a token count.
@@ -146,6 +156,8 @@ impl Default for InstallArgs {
         Self {
             auth: AuthArgs::default(),
             model: DEFAULT_MODEL.to_string(),
+            auto_review_model: DEFAULT_AUTO_REVIEW.to_string(),
+            no_auto_review: false,
             context_window: DEFAULT_WINDOW.to_string(),
             model_window: Vec::new(),
             catalog: None,
@@ -204,6 +216,8 @@ mod tests {
         };
         let d = InstallArgs::default();
         assert_eq!(a.model, d.model);
+        assert_eq!(a.auto_review_model, d.auto_review_model);
+        assert_eq!(a.no_auto_review, d.no_auto_review);
         assert_eq!(a.context_window, d.context_window);
         assert_eq!(a.model_window, d.model_window);
         assert_eq!(a.catalog, d.catalog);
@@ -222,6 +236,7 @@ mod tests {
             "--compact-ratio",
             "--no-copy",
             "--set-default",
+            "--skip-auto-review",
         ] {
             assert!(
                 Cli::try_parse_from(["codex-copilot", "install", flag]).is_err(),
