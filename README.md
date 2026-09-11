@@ -31,7 +31,104 @@ that sets the variable; you run it.
   must list it with `policy.state == enabled` and `ws:/responses` among its
   `supported_endpoints`. `install` warns (with the remedy) rather than aborting
   if it is not, so the rest of the setup still lands.
-- Build from source: Rust 1.88+, `cargo build --release`.
+- Only when building from source: Rust 1.88+ (plus the Visual C++ build tools on
+  Windows). The portable executable needs neither Rust nor a separate Visual
+  C++ Redistributable installation.
+
+## Get the executable
+
+### Windows portable (no installer)
+
+Download a Windows executable from [GitHub Releases](https://github.com/ItsAlbertZhang/codex-copilot/releases)
+when a release is available. Choose `windows-x64` for Intel/AMD PCs or
+`windows-arm64` for Windows on ARM. Put it in a permanent folder, rename it to
+`codex-copilot.exe` if you like, and run it from PowerShell:
+
+```powershell
+.\codex-copilot.exe --help
+.\codex-copilot.exe login
+# After setting the token as instructed and opening a new terminal:
+.\codex-copilot.exe install
+codex --profile copilot
+```
+
+Each executable ships a matching `.sha256` file beside it. Verify the download
+with `Get-FileHash .\codex-copilot-1.0.0-windows-x64.exe -Algorithm SHA256` and
+compare the hash with the one in that file.
+
+The exe is self-contained and can be copied on its own. Keep it for later use;
+optionally add its folder to PATH so `codex-copilot` works from anywhere.
+The `install` subcommand configures the Codex profile; it does not install the
+executable. Profile data still lives under `$CODEX_HOME` (normally `~/.codex`).
+Codex CLI and a Copilot seat are still required.
+
+### macOS portable (no installer)
+
+Download a macOS binary and its `.sha256` from the same releases page. Choose
+`macos-arm64` for Apple silicon or `macos-x64` for Intel Macs, then:
+
+```console
+$ shasum -a 256 -c codex-copilot-1.0.0-macos-arm64.sha256
+$ chmod +x codex-copilot-1.0.0-macos-arm64
+$ ./codex-copilot-1.0.0-macos-arm64 --help
+```
+
+The binary is unsigned, so Gatekeeper blocks the first run; clear the quarantine
+flag with `xattr -d com.apple.quarantine codex-copilot-1.0.0-macos-arm64`.
+Rename it to `codex-copilot` and put its folder on PATH if you like.
+
+### Cargo (Windows, macOS, Linux)
+
+Install once from this repository; Cargo places the executable in its bin
+directory (normally `~/.cargo/bin`):
+
+```console
+cargo install --git https://github.com/ItsAlbertZhang/codex-copilot.git --locked codex-copilot
+```
+
+From a local checkout, use `cargo install --path . --locked`. Re-run the git
+command to update. This checkout disables crates.io publishing with
+`publish = false`; use the git or local-path command above.
+
+### Build a portable Windows executable
+
+From the repository root, using Windows PowerShell or PowerShell 7:
+
+```powershell
+# Defaults to the current Rust host architecture:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+# Or select a target (matching Visual C++ tools must also be installed):
+rustup target add x86_64-pc-windows-msvc
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc
+```
+
+The script links the MSVC runtime statically and writes two files under
+`dist/`: `codex-copilot-<version>-windows-<arch>.exe` and a matching
+`.exe.sha256` checksum. It uses `Cargo.lock` and keeps its build files under
+`target/portable/`. For ARM64, use `aarch64-pc-windows-msvc`.
+`-ExecutionPolicy Bypass` applies only to this PowerShell process and does not
+change the machine's execution policy.
+
+### Build a portable macOS binary
+
+From the repository root on macOS, with the Xcode command line tools and `jq`
+installed:
+
+```console
+$ ./scripts/package-macos.sh                        # current Rust host target
+$ rustup target add x86_64-apple-darwin
+$ ./scripts/package-macos.sh x86_64-apple-darwin    # or select a target
+```
+
+It writes `dist/codex-copilot-<version>-macos-<arch>` and a matching `.sha256`,
+uses `Cargo.lock`, and keeps its build files under `target/portable/`. Each
+binary is single-architecture; there is no universal build.
+
+The **portable-release** GitHub Actions workflow builds both Windows and both
+macOS targets. Run it manually to download the binaries from the workflow's
+artifacts, or push a tag matching the Cargo version (for example `v1.0.0`) to
+create a draft GitHub Release with every binary and checksum. Review and publish
+the draft to make the downloads public.
 
 ## Install
 

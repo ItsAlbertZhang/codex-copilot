@@ -1,4 +1,5 @@
 /target
+/dist
 
 # Local research artifacts and probe logs (not part of the project)
 /.local/
