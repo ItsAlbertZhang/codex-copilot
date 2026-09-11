@@ -297,6 +297,85 @@ fn read_u64(obj: &Map<String, Value>, key: &str) -> Option<u64> {
     obj.get(key).and_then(Value::as_u64)
 }
 
+/// Select a real CAPI reviewer via Codex's native per-model override. Leave
+/// slugs, model messages (including Guardian policy), and unserved entries alone.
+/// Validate before replacing `catalog.json`, so failures cannot partially apply.
+pub fn configure_auto_review(
+    catalog: &mut Calibrated,
+    facts: &Facts,
+    main_model: &str,
+    reviewer: &str,
+) -> Result<usize> {
+    let mut doc: Value = serde_json::from_str(&catalog.json)?;
+    let models = doc["models"]
+        .as_array_mut()
+        .context("catalog has no models")?;
+    validate_auto_review(models, facts, main_model, reviewer)?;
+    let mut count = 0;
+    for model in models {
+        if model["slug"]
+            .as_str()
+            .is_some_and(|slug| facts.contains_key(slug))
+        {
+            model["auto_review_model_override"] = Value::from(reviewer);
+            count += 1;
+        }
+    }
+    catalog.json = serde_json::to_string_pretty(&doc)? + "\n";
+    Ok(count)
+}
+
+/// Candidates for setup use exactly the validation applied to explicit IDs.
+pub fn auto_review_candidates(
+    catalog: &Calibrated,
+    facts: &Facts,
+    main_model: &str,
+) -> Result<Vec<String>> {
+    let doc: Value = serde_json::from_str(&catalog.json)?;
+    let models = doc["models"].as_array().context("catalog has no models")?;
+    Ok(models
+        .iter()
+        .filter_map(|m| m["slug"].as_str())
+        .filter(|slug| validate_auto_review(models, facts, main_model, slug).is_ok())
+        .map(str::to_string)
+        .collect())
+}
+
+fn validate_auto_review(
+    models: &[Value],
+    facts: &Facts,
+    main_model: &str,
+    reviewer: &str,
+) -> Result<()> {
+    let fact = facts.get(reviewer).with_context(|| {
+        format!("--auto-review-model {reviewer}: model is not served on this CAPI seat")
+    })?;
+    anyhow::ensure!(
+        fact.policy_ok() && fact.ws,
+        "--auto-review-model {reviewer}: model must be enabled and support ws:/responses"
+    );
+    for slug in [main_model, reviewer] {
+        anyhow::ensure!(
+            facts.contains_key(slug) && models.iter().any(|m| m["slug"].as_str() == Some(slug)),
+            "--auto-review-model: {slug} must be present in both CAPI and the Codex catalog"
+        );
+    }
+    for model in models {
+        let Some(slug) = model["slug"].as_str() else {
+            continue;
+        };
+        if !facts.contains_key(slug) {
+            continue;
+        }
+        anyhow::ensure!(
+            model.get("auto_review_model_override").is_some(),
+            "--auto-review-model: catalog entry {slug} lacks auto_review_model_override; \
+             update Codex and use its matching bundled catalog"
+        );
+    }
+    Ok(())
+}
+
 fn write_entry(obj: &mut Map<String, Value>, window: u64, max: u64, compact: u64) {
     obj.insert("context_window".into(), Value::from(window));
     obj.insert("max_context_window".into(), Value::from(max));

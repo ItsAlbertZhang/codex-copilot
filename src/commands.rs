@@ -2,6 +2,7 @@
 //! meet.
 
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{self, Row};
 use crate::codex::CodexBin;
-use crate::{auth, capi, overlay, AuthArgs, InstallArgs, TOKEN_ENV};
+use crate::{auth, capi, overlay, setup, AuthArgs, InstallArgs, TOKEN_ENV};
 
 /// What every command needs to know about where it is operating.
 #[derive(Debug)]
@@ -89,6 +90,8 @@ pub struct State {
     pub codex_version: String,
     pub host: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_review_model: Option<String>,
     pub context_window: String,
     pub models: Vec<Row>,
 }
@@ -186,7 +189,7 @@ pub fn install(ctx: &Ctx, args: &InstallArgs) -> Result<()> {
             )
         })?,
     };
-    let calibrated = catalog::calibrate(&bundled, &facts, choice, &overrides)?;
+    let mut calibrated = catalog::calibrate(&bundled, &facts, choice, &overrides)?;
     print_table(&calibrated.rows);
     let untouched = calibrated.untouched();
     if !untouched.is_empty() {
@@ -201,12 +204,29 @@ pub fn install(ctx: &Ctx, args: &InstallArgs) -> Result<()> {
 
     // --- the model we are about to write ----------------------------------
     check_model(&args.model, &facts, &host);
+    let auto_review_model = if let Some(model) = &args.auto_review_model {
+        Some(model.clone())
+    } else if args.skip_auto_review || args.auth.token_stdin || !io::stdin().is_terminal() {
+        None
+    } else {
+        let candidates = catalog::auto_review_candidates(&calibrated, &facts, &args.model)?;
+        setup::choose_auto_review(
+            &mut io::stdin().lock(),
+            &mut io::stdout().lock(),
+            &candidates,
+        )?
+    };
+    if let Some(reviewer) = &auto_review_model {
+        let count = catalog::configure_auto_review(&mut calibrated, &facts, &args.model, reviewer)?;
+        println!("Auto-review  {reviewer}  (native override for {count} catalog entries)");
+    }
 
     // --- write ------------------------------------------------------------
     let catalog_path = ctx.catalog_path();
     let overlay_text = overlay::render(&overlay::Params {
         profile: &ctx.profile,
         model: &args.model,
+        auto_review: auto_review_model.is_some(),
         host: &host,
         codex_version: &codex_version,
         catalog_path: &catalog_path,
@@ -218,6 +238,7 @@ pub fn install(ctx: &Ctx, args: &InstallArgs) -> Result<()> {
         codex_version: codex_version.clone(),
         host: host.clone(),
         model: args.model.clone(),
+        auto_review_model,
         context_window: args.context_window.clone(),
         models: calibrated.rows.clone(),
     };
@@ -330,6 +351,9 @@ pub fn status(ctx: &Ctx) -> Result<()> {
         state.installed_at, state.codex_version
     );
     println!("host         {}", state.host);
+    if let Some(reviewer) = &state.auto_review_model {
+        println!("auto-review  {reviewer}");
+    }
     println!(
         "model        {}  (--context-window {})",
         state.model, state.context_window
@@ -403,6 +427,34 @@ pub fn status(ctx: &Ctx) -> Result<()> {
         Some("re-run `codex-copilot install`".into()),
     );
 
+    if let Some(reviewer) = &state.auto_review_model {
+        let doc = fs::read_to_string(&catalog_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        let mappings_ok = doc
+            .as_ref()
+            .and_then(|d| d["models"].as_array())
+            .is_some_and(|models| {
+                state.models.iter().filter(|r| r.served).all(|row| {
+                    models.iter().any(|m| {
+                        m["slug"].as_str() == Some(&row.slug)
+                            && m["auto_review_model_override"].as_str() == Some(reviewer)
+                    })
+                })
+            });
+        let reviewer_ok = overlay_ok
+            .as_ref()
+            .and_then(|doc| doc.get("approvals_reviewer"))
+            .and_then(toml::Value::as_str)
+            == Some("auto_review");
+        check(
+            "review route",
+            mappings_ok && reviewer_ok,
+            reviewer.clone(),
+            Some(format!("re-run install --auto-review-model {reviewer}")),
+        );
+    }
+
     if let Some(token) = token {
         let probe = capi::probe_host(&capi::client()?, &state.host, &token);
         check(
@@ -412,6 +464,14 @@ pub fn status(ctx: &Ctx) -> Result<()> {
             Some("re-run `codex-copilot login`; the token may be revoked or expired".into()),
         );
         if let Some(facts) = probe.facts {
+            if let Some(reviewer) = &state.auto_review_model {
+                check(
+                    "review model",
+                    facts.get(reviewer).is_some_and(|f| f.policy_ok() && f.ws),
+                    reviewer.clone(),
+                    Some("re-run install with an enabled --auto-review-model <slug>".into()),
+                );
+            }
             let f = facts.get(&state.model);
             check(
                 "model",

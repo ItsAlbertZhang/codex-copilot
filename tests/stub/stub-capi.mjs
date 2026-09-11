@@ -92,6 +92,8 @@ function bundledCatalog() {
     context_window: ctx,
     max_context_window: max,
     auto_compact_token_limit: null,
+    auto_review_model_override: null,
+    model_messages: { auto_review: { policy: 'fixture policy: preserve unchanged' } },
     prefer_websockets: true,
     ...extra,
   });

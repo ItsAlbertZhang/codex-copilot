@@ -16,6 +16,7 @@ mod catalog;
 mod codex;
 mod commands;
 mod overlay;
+mod setup;
 
 use std::path::PathBuf;
 
@@ -110,6 +111,15 @@ pub struct InstallArgs {
     #[arg(long, value_name = "ID", default_value = DEFAULT_MODEL)]
     pub model: String,
 
+    /// Enable automatic approval review with this CAPI model (experimental).
+    /// Requires a Codex catalog with auto_review_model_override support.
+    #[arg(long, value_name = "ID")]
+    pub auto_review_model: Option<String>,
+
+    /// Skip the automatic approval setup question; inherit Codex's reviewer setting.
+    #[arg(long, conflicts_with = "auto_review_model")]
+    pub skip_auto_review: bool,
+
     /// Window every calibrated model is budgeted against: `max` (everything
     /// CAPI accepts, billed ~2x above the base tier), `base` (the
     /// standard-price tier), or a token count.
@@ -146,6 +156,8 @@ impl Default for InstallArgs {
         Self {
             auth: AuthArgs::default(),
             model: DEFAULT_MODEL.to_string(),
+            auto_review_model: None,
+            skip_auto_review: false,
             context_window: DEFAULT_WINDOW.to_string(),
             model_window: Vec::new(),
             catalog: None,
@@ -204,6 +216,8 @@ mod tests {
         };
         let d = InstallArgs::default();
         assert_eq!(a.model, d.model);
+        assert_eq!(a.auto_review_model, d.auto_review_model);
+        assert_eq!(a.skip_auto_review, d.skip_auto_review);
         assert_eq!(a.context_window, d.context_window);
         assert_eq!(a.model_window, d.model_window);
         assert_eq!(a.catalog, d.catalog);

@@ -167,6 +167,8 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
     let cwd = std::env::current_dir().unwrap();
     let home = TempDir::new_in(&cwd).unwrap();
     let stub = Stub::start(&[]);
+    let base_config = "approvals_reviewer = \"auto_review\"\napproval_policy = \"on-request\"\n";
+    std::fs::write(home.path().join("config.toml"), base_config).unwrap();
     let r = install(home.path().strip_prefix(&cwd).unwrap(), &stub, &[]);
     r.ok()
         // The token is echoed once, with the one-liner the user runs.
@@ -183,6 +185,14 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
 
     // Calibration: the seat allows astra 872k, the bundled catalog said 272k.
     let config: toml::Value = toml::from_str(&text).unwrap();
+    // Skipping setup leaves reviewer selection and approval policy inherited.
+    assert!(config.get("approvals_reviewer").is_none());
+    assert!(config.get("approval_policy").is_none());
+    assert!(config.get("sandbox_mode").is_none());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        base_config
+    );
     let catalog_path = Path::new(config["model_catalog_json"].as_str().unwrap());
     assert!(catalog_path.is_absolute());
     let cat = read_json(catalog_path);
@@ -205,6 +215,108 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
     // No secret ever reaches state.json.
     let raw = std::fs::read_to_string(home.path().join("copilot_config_toml/state.json")).unwrap();
     assert!(!raw.contains(TOKEN) && !raw.contains("login"));
+}
+
+#[test]
+fn auto_review_selects_a_real_model_and_preserves_catalog_policy() {
+    let home = TempDir::new().unwrap();
+    let stub = Stub::start(&[]);
+    install(home.path(), &stub, &[]).ok();
+    let before = catalog(home.path());
+    install(home.path(), &stub, &["--auto-review-model", "gpt-5.5"])
+        .ok()
+        .has("Auto-review  gpt-5.5");
+    let config: toml::Value = toml::from_str(&overlay(home.path())).unwrap();
+    assert_eq!(config["approvals_reviewer"].as_str(), Some("auto_review"));
+    assert!(config.get("approval_policy").is_none());
+    assert!(config.get("sandbox_mode").is_none());
+    let mut after = catalog(home.path());
+    for entry in after["models"].as_array_mut().unwrap() {
+        if entry["slug"] == "gpt-5.2" {
+            assert!(entry["auto_review_model_override"].is_null());
+        } else {
+            assert_eq!(entry["auto_review_model_override"], "gpt-5.5");
+            entry["auto_review_model_override"] = Value::Null;
+        }
+    }
+    // Only the routing field changes: no alias, prompt, or policy rewrite.
+    assert_eq!(after, before);
+    let state = read_json(&home.path().join("copilot_config_toml/state.json"));
+    assert_eq!(state["auto_review_model"], "gpt-5.5");
+    run_with(home.path(), &["status"], Some(TOKEN))
+        .ok()
+        .has("review model ok");
+    let mut broken = catalog(home.path());
+    broken["models"][0]["auto_review_model_override"] = Value::Null;
+    std::fs::write(
+        home.path().join("copilot_config_toml/models-catalog.json"),
+        serde_json::to_string(&broken).unwrap(),
+    )
+    .unwrap();
+    run_with(home.path(), &["status"], Some(TOKEN))
+        .ok()
+        .has("review route FAIL");
+
+    // Reinstalling without opt-in restores inheritance and the original catalog.
+    install(home.path(), &stub, &[]).ok();
+    let config: toml::Value = toml::from_str(&overlay(home.path())).unwrap();
+    assert!(config.get("approvals_reviewer").is_none());
+    assert_eq!(catalog(home.path()), before);
+}
+
+#[test]
+fn unusable_review_models_fail_before_changing_an_installation() {
+    for (stub_args, reviewer, message) in [
+        (vec![], "codex-auto-review", "not served"),
+        (
+            vec!["--policy", "disabled"],
+            "gpt-6-astra",
+            "must be enabled",
+        ),
+        (vec!["--no-ws"], "gpt-6-astra", "support ws:/responses"),
+        (
+            vec!["--model", "unknown"],
+            "unknown",
+            "both CAPI and the Codex catalog",
+        ),
+    ] {
+        let home = TempDir::new().unwrap();
+        let stub = Stub::start(&stub_args);
+        install(home.path(), &stub, &[]).ok();
+        let before = overlay(home.path());
+        let before_catalog = catalog(home.path());
+        let before_state = read_json(&home.path().join("copilot_config_toml/state.json"));
+        install(home.path(), &stub, &["--auto-review-model", reviewer])
+            .failed()
+            .has(message);
+        assert_eq!(overlay(home.path()), before);
+        assert_eq!(catalog(home.path()), before_catalog);
+        assert_eq!(
+            read_json(&home.path().join("copilot_config_toml/state.json")),
+            before_state
+        );
+    }
+}
+
+#[test]
+fn auto_review_rejects_catalogs_without_the_native_override_field() {
+    let home = TempDir::new().unwrap();
+    let stub = Stub::start(&[]);
+    let old_catalog = home.path().join("old-catalog.json");
+    std::fs::write(&old_catalog, r#"{"models":[{"slug":"gpt-6-astra"}]}"#).unwrap();
+    install(
+        home.path(),
+        &stub,
+        &[
+            "--catalog",
+            old_catalog.to_str().unwrap(),
+            "--auto-review-model",
+            "gpt-6-astra",
+        ],
+    )
+    .failed()
+    .has("lacks auto_review_model_override");
+    assert!(!home.path().join("copilot.config.toml").exists());
 }
 
 #[test]
