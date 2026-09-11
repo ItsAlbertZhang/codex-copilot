@@ -5,6 +5,14 @@ stateful `ws:/responses` transport, with native remote compaction v2, and
 recalibrates the bundled model catalog so every model on your seat budgets
 against its own real CAPI context window.
 
+It is deliberately **not a proxy**. Nothing sits between Codex and CAPI at
+runtime: Codex opens the WebSocket to `api.*.githubcopilot.com` itself, sends
+the bearer itself, and keeps the connection-bound state (`previous_response_id`,
+incremental input, server-side compaction) that a relay would have to replay or
+break. What this tool does is one-shot: it computes the configuration that makes
+the native path work and writes it down. After that it is out of the loop, and
+`codex` runs with no extra process, port, or certificate.
+
 It writes one overlay file plus one directory under `$CODEX_HOME`. Your
 `config.toml` is never touched, and nothing is active until you pass
 `--profile copilot`.
