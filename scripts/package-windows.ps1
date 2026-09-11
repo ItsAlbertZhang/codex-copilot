@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc')]
+    # No ValidateSet: the switch below is the single validation point, so an
+    # unsupported host detected from 'rustc -vV' also gets the friendly message.
     [string]$Target
 )
 
@@ -40,11 +41,21 @@ try {
         throw "Portable build failed. Ensure 'rustup target add $Target' and the matching Visual C++ tools are installed."
     }
 
+    # Nothing else checks the ARM64 binary (no ARM runner), so assert the PE
+    # machine field of what was just built matches the requested target.
+    $executable = Join-Path $buildRoot "$Target/release/codex-copilot.exe"
+    $header = [System.IO.File]::ReadAllBytes($executable)
+    $machine = [System.BitConverter]::ToUInt16($header, [System.BitConverter]::ToInt32($header, 0x3C) + 4)
+    $expectedMachine = if ($architecture -eq 'x64') { 0x8664 } else { 0xAA64 }
+    if ($machine -ne $expectedMachine) {
+        throw ('Built {0} has PE machine 0x{1:X4}, expected 0x{2:X4} for {3}.' -f $executable, $machine, $expectedMachine, $Target)
+    }
+
     $artifactName = "codex-copilot-$($package.version)-windows-$architecture"
     $distRoot = Join-Path $projectRoot 'dist'
     $stage = Join-Path $distRoot $artifactName
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
-    Copy-Item -LiteralPath (Join-Path $buildRoot "$Target/release/codex-copilot.exe") -Destination $stage
+    Copy-Item -LiteralPath $executable -Destination $stage
     Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md'), (Join-Path $projectRoot 'LICENSE') -Destination $stage
 
     $quickStart = @'

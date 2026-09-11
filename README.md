@@ -39,7 +39,7 @@ that sets the variable; you run it.
 
 ### Windows portable (no installer)
 
-Download a Windows zip from [GitHub Releases](https://github.com/ItsLucas/codex-copilot/releases)
+Download a Windows zip from [GitHub Releases](https://github.com/ItsAlbertZhang/codex-copilot/releases)
 when a release is available. Choose `windows-x64` for Intel/AMD PCs or
 `windows-arm64` for Windows on ARM. Extract it to a permanent folder and run
 the executable from PowerShell:
@@ -51,6 +51,10 @@ the executable from PowerShell:
 .\codex-copilot.exe install
 codex --profile copilot
 ```
+
+Each zip ships a matching `.sha256` file. Verify the download with
+`Get-FileHash .\codex-copilot-1.0.0-windows-x64.zip -Algorithm SHA256` and
+compare the hash with the one in that file.
 
 The exe is self-contained and can be copied on its own. Keep it for later use;
 optionally add its folder to PATH so `codex-copilot` works from anywhere.
@@ -64,7 +68,7 @@ Install once from this repository; Cargo places the executable in its bin
 directory (normally `~/.cargo/bin`):
 
 ```console
-cargo install --git https://github.com/ItsLucas/codex-copilot.git --locked codex-copilot
+cargo install --git https://github.com/ItsAlbertZhang/codex-copilot.git --locked codex-copilot
 ```
 
 From a local checkout, use `cargo install --path . --locked`. Re-run the git

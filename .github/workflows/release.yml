@@ -3,6 +3,11 @@ name: portable-release
 on:
   push:
     tags: ['v*']
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/release.yml'
+      - 'Cargo.toml'
   workflow_dispatch:
 
 permissions:
