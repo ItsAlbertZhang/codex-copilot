@@ -62,6 +62,21 @@ The `install` subcommand configures the Codex profile; it does not install the
 executable. Profile data still lives under `$CODEX_HOME` (normally `~/.codex`).
 Codex CLI and a Copilot seat are still required.
 
+### macOS portable (no installer)
+
+Download a macOS binary and its `.sha256` from the same releases page. Choose
+`macos-arm64` for Apple silicon or `macos-x64` for Intel Macs, then:
+
+```console
+$ shasum -a 256 -c codex-copilot-1.0.0-macos-arm64.sha256
+$ chmod +x codex-copilot-1.0.0-macos-arm64
+$ ./codex-copilot-1.0.0-macos-arm64 --help
+```
+
+The binary is unsigned, so Gatekeeper blocks the first run; clear the quarantine
+flag with `xattr -d com.apple.quarantine codex-copilot-1.0.0-macos-arm64`.
+Rename it to `codex-copilot` and put its folder on PATH if you like.
+
 ### Cargo (Windows, macOS, Linux)
 
 Install once from this repository; Cargo places the executable in its bin
@@ -94,11 +109,26 @@ The script links the MSVC runtime statically and writes two files under
 `-ExecutionPolicy Bypass` applies only to this PowerShell process and does not
 change the machine's execution policy.
 
-The **portable-release** GitHub Actions workflow builds both Windows targets.
-Run it manually to download the executables from the workflow's artifacts, or
-push a tag matching the Cargo version (for example `v1.0.0`) to create a draft
-GitHub Release with both executables and checksums. Review and publish the draft
-to make the downloads public.
+### Build a portable macOS binary
+
+From the repository root on macOS, with the Xcode command line tools and `jq`
+installed:
+
+```console
+$ ./scripts/package-macos.sh                        # current Rust host target
+$ rustup target add x86_64-apple-darwin
+$ ./scripts/package-macos.sh x86_64-apple-darwin    # or select a target
+```
+
+It writes `dist/codex-copilot-<version>-macos-<arch>` and a matching `.sha256`,
+uses `Cargo.lock`, and keeps its build files under `target/portable/`. Each
+binary is single-architecture; there is no universal build.
+
+The **portable-release** GitHub Actions workflow builds both Windows and both
+macOS targets. Run it manually to download the binaries from the workflow's
+artifacts, or push a tag matching the Cargo version (for example `v1.0.0`) to
+create a draft GitHub Release with every binary and checksum. Review and publish
+the draft to make the downloads public.
 
 ## Install
 
