@@ -55,7 +55,7 @@ codex --profile copilot
 ```
 
 Each executable ships a matching `.sha256` file beside it. Verify the download
-with `Get-FileHash .\codex-copilot-1.0.0-windows-x64.exe -Algorithm SHA256` and
+with `Get-FileHash .\codex-copilot-1.1.0-windows-x64.exe -Algorithm SHA256` and
 compare the hash with the one in that file.
 
 The exe is self-contained and can be copied on its own. Keep it for later use;
@@ -70,13 +70,13 @@ Download a macOS binary and its `.sha256` from the same releases page. Choose
 `macos-arm64` for Apple silicon or `macos-x64` for Intel Macs, then:
 
 ```console
-$ shasum -a 256 -c codex-copilot-1.0.0-macos-arm64.sha256
-$ chmod +x codex-copilot-1.0.0-macos-arm64
-$ ./codex-copilot-1.0.0-macos-arm64 --help
+$ shasum -a 256 -c codex-copilot-1.1.0-macos-arm64.sha256
+$ chmod +x codex-copilot-1.1.0-macos-arm64
+$ ./codex-copilot-1.1.0-macos-arm64 --help
 ```
 
 The binary is unsigned, so Gatekeeper blocks the first run; clear the quarantine
-flag with `xattr -d com.apple.quarantine codex-copilot-1.0.0-macos-arm64`.
+flag with `xattr -d com.apple.quarantine codex-copilot-1.1.0-macos-arm64`.
 Rename it to `codex-copilot` and put its folder on PATH if you like.
 
 ### Cargo (Windows, macOS, Linux)
