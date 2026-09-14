@@ -77,9 +77,14 @@ env_key = "{TOKEN_ENV}"
 [features]
 remote_compaction_v2 = true
 # name = "OpenAI" would otherwise enable image generation, which CAPI does not
-# serve, and the plugin keys make the app-server fetch chatgpt.com at startup.
+# serve.
 image_generation = false
-plugins = false
+# `plugins` stays at its default (on): the bundled plugins carry the skills
+# for Computer Use and friends. These four ride on the ChatGPT backend instead:
+# remote_plugin needs a ChatGPT login and, when on, drops the bundled `sites`
+# skills; tool_suggest hands the model a plugin-install tool whose sources are
+# chatgpt.com; apps are ChatGPT connectors; recommended_plugins is off by
+# default and pinned here.
 remote_plugin = false
 recommended_plugins = false
 tool_suggest = false
@@ -201,7 +206,6 @@ mod tests {
         );
         for off in [
             "image_generation",
-            "plugins",
             "remote_plugin",
             "recommended_plugins",
             "tool_suggest",
