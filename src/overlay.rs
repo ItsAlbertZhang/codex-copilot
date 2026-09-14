@@ -35,8 +35,9 @@ pub fn render(p: &Params) -> String {
     format!(
         r#"# codex-copilot {installer} - Codex {codex} against GitHub Copilot CAPI over
 # stateful ws:/responses. Managed file: `codex-copilot install` rewrites it.
-# Active only for `codex --profile {profile}`; config.toml is never touched.
-# Roll back with `codex-copilot uninstall`, or delete this file.
+# Use `codex --profile {profile}`; install leaves config.toml unchanged.
+# `codex-copilot override --profile {profile}` merges this file into config.toml.
+# Undo an override with `unoverride` before reinstalling or uninstalling this profile.
 
 model = "{model}"
 model_provider = "{id}"
