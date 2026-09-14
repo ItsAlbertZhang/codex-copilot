@@ -15,6 +15,7 @@ mod capi;
 mod catalog;
 mod codex;
 mod commands;
+mod config_override;
 mod defaults;
 mod overlay;
 
@@ -40,7 +41,9 @@ const DEFAULT_WINDOW: &str = "max";
     about = "Wire an installed OpenAI Codex CLI to GitHub Copilot CAPI (stateful ws:/responses).",
     long_about = "Writes one file, $CODEX_HOME/<profile>.config.toml, which Codex reads only when \
                   you pass `--profile <profile>`, plus a model catalog calibrated to what CAPI \
-                  really allows this seat. config.toml is never touched.\n\n\
+                  really allows this seat. install leaves config.toml unchanged; override merges \
+                  the profile into it, and unoverride restores config.toml to its pre-override \
+                  content.\n\n\
                   The bearer is a GitHub OAuth token, read at runtime from the \
                   COPILOT_GITHUB_TOKEN environment variable. `login` prints one; setting the \
                   variable is left to you.",
@@ -79,6 +82,10 @@ enum Cmd {
     Login(AuthArgs),
     /// Summarise the install and check every link in the chain.
     Status,
+    /// Merge the installed profile into config.toml, backing up the whole file.
+    Override,
+    /// Restore config.toml to its pre-override content, then drop the backup.
+    Unoverride,
     /// Remove the overlay and the profile directory.
     Uninstall,
 }
@@ -189,6 +196,8 @@ fn run() -> Result<()> {
         Some(Cmd::Install(args)) => commands::install(&ctx, &args),
         Some(Cmd::Login(args)) => commands::login(&args),
         Some(Cmd::Status) => commands::status(&ctx),
+        Some(Cmd::Override) => config_override::apply(&ctx),
+        Some(Cmd::Unoverride) => config_override::restore(&ctx),
         Some(Cmd::Uninstall) => commands::uninstall(&ctx),
     }
 }

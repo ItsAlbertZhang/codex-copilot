@@ -1,4 +1,4 @@
-//! The four commands, and the only place the auth half and the config half
+//! Installation commands, and the only place the auth half and the config half
 //! meet.
 
 use std::fs;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{self, Row};
 use crate::codex::CodexBin;
-use crate::{auth, capi, overlay, AuthArgs, InstallArgs, TOKEN_ENV};
+use crate::{auth, capi, config_override, overlay, AuthArgs, InstallArgs, TOKEN_ENV};
 
 /// What every command needs to know about where it is operating.
 #[derive(Debug)]
@@ -67,6 +67,15 @@ impl Ctx {
     pub fn state_path(&self) -> PathBuf {
         self.dir().join("state.json")
     }
+    /// `$CODEX_HOME/config.toml`: the shared config every profile layers on.
+    pub fn config_path(&self) -> PathBuf {
+        self.codex_home.join("config.toml")
+    }
+    /// Where `unoverride` parks a config.toml that was edited under an
+    /// override, instead of discarding the user's work.
+    pub fn discarded_path(&self) -> PathBuf {
+        self.codex_home.join("config.toml.unoverride-discarded")
+    }
 
     /// The installed Codex version: the hidden override, else `codex --version`.
     fn version(&self) -> Result<String> {
@@ -93,6 +102,16 @@ pub struct State {
     pub auto_review_model: Option<String>,
     pub context_window: String,
     pub models: Vec<Row>,
+}
+
+/// `state.json` as `install` wrote it. Every caller judges "installed" by this,
+/// so a file that parses as JSON but not as a `State` is not an install.
+pub fn read_state(ctx: &Ctx) -> Result<State> {
+    let path = ctx.state_path();
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?;
+    serde_json::from_str(&text)
+        .with_context(|| format!("{} is not a codex-copilot state.json", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +148,9 @@ fn resolve_token(client: &Client, args: &AuthArgs, allow_env: bool) -> Result<au
 // ---------------------------------------------------------------------------
 
 pub fn install(ctx: &Ctx, args: &InstallArgs) -> Result<()> {
+    if !ctx.dry_run {
+        config_override::ensure_not_owner(ctx)?;
+    }
     let choice = catalog::parse_window_choice(&args.context_window)?;
     let overrides = args
         .model_window
@@ -330,10 +352,8 @@ fn print_table(rows: &[Row]) {
 // ---------------------------------------------------------------------------
 
 pub fn status(ctx: &Ctx) -> Result<()> {
-    let state: Option<State> = fs::read_to_string(ctx.state_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
-    let Some(state) = state else {
+    config_override::print_status(ctx);
+    let Ok(state) = read_state(ctx) else {
         println!(
             "Not installed for profile `{}` (no {}).\nRun: codex-copilot install",
             ctx.profile,
@@ -507,6 +527,9 @@ pub fn status(ctx: &Ctx) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn uninstall(ctx: &Ctx) -> Result<()> {
+    if !ctx.dry_run {
+        config_override::ensure_not_owner(ctx)?;
+    }
     let dir = ctx.dir();
     let overlay_path = ctx.overlay_path();
     let mut removed: Vec<String> = Vec::new();
@@ -597,6 +620,10 @@ mod tests {
         assert!(c.dir().ends_with("copilot_config_toml"));
         assert!(c.catalog_path().ends_with("models-catalog.json"));
         assert!(c.state_path().ends_with("state.json"));
+        assert!(c.config_path().ends_with("config.toml"));
+        assert!(c
+            .discarded_path()
+            .ends_with("config.toml.unoverride-discarded"));
     }
 
     #[test]

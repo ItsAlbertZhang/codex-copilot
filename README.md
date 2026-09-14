@@ -13,9 +13,11 @@ break. What this tool does is one-shot: it computes the configuration that makes
 the native path work and writes it down. After that it is out of the loop, and
 `codex` runs with no extra process, port, or certificate.
 
-It writes one overlay file plus one directory under `$CODEX_HOME`. Your
-`config.toml` is never touched, and nothing is active until you pass
-`--profile copilot`.
+`install` writes one overlay file plus one directory under `$CODEX_HOME`. Your
+`config.toml` is not touched, and nothing is active until you pass
+`--profile copilot`. Clients that cannot pass a profile (the desktop app, App
+Server) get the same configuration through `override`, which merges the overlay
+into `config.toml` behind a backup that `unoverride` restores.
 
 The bearer is your GitHub OAuth token, read at request time from the
 `COPILOT_GITHUB_TOKEN` environment variable. **This tool never stores it** - no
@@ -173,9 +175,12 @@ with your `codex --version`, calibrates it, and writes the profile. Add
 | `$CODEX_HOME/copilot.config.toml` | the overlay Codex layers on `config.toml` when `--profile copilot` is passed |
 | `$CODEX_HOME/copilot_config_toml/models-catalog.json` | the calibrated catalog (`model_catalog_json`) |
 | `$CODEX_HOME/copilot_config_toml/state.json` | host, model, reviewer, codex version, calibration table, timestamp - no secrets |
+| `$CODEX_HOME/config.toml` | written only by `override` / `unoverride` |
+| `$CODEX_HOME/codex-copilot.override-backup.json` | JSON holding the `config.toml` that `override` replaced (`null` if there was none) and the text it wrote; removed by `unoverride` |
+| `$CODEX_HOME/config.toml.unoverride-discarded` | written by `unoverride` only if `config.toml` was edited while the override was active |
 
-Nothing else on the machine changes: not `config.toml`, not the credential
-store, not your environment variables.
+`install` writes only the first three. Nothing else on the machine changes: not
+the credential store, not your environment variables.
 
 ## Usage
 
@@ -185,15 +190,79 @@ $ codex --profile copilot exec "..."
 $ codex --profile copilot resume --last      # resume with the same profile
 ```
 
-Plain `codex` keeps using your untouched base config. Sessions started under the
-profile must be resumed under it too, or they fall back to your default
-provider.
+Without an active override, plain `codex` keeps using your base config. Sessions
+started under the profile must be resumed under it too, or they fall back to
+your default provider.
 
 `codex-copilot status` re-checks the whole chain (token present, codex version
 vs catalog version, `GET /models`, the model's policy and `ws:/responses`,
-overlay and catalog parse). `codex doctor` is not profile-aware, so the real
-end-to-end check is to start `codex --profile copilot` and send one short
-message.
+overlay and catalog parse) and reports whether an override is active.
+`codex doctor` is not profile-aware, so the real end-to-end check is to start
+`codex --profile copilot` and send one short message.
+
+## Desktop app and App Server
+
+Codex App Server does not accept `--profile`. After a complete `install` (the
+overlay, catalog and `state.json` must all be present), apply the current
+overlay to the shared user configuration:
+
+```console
+$ codex-copilot override --dry-run
+$ codex-copilot override
+$ codex app-server
+```
+
+For the ChatGPT desktop app, restart it after applying the override and start a
+new **Work** or **Codex** task. The app must use the same `CODEX_HOME` and inherit
+`COPILOT_GITHUB_TOKEN`. Every other Codex client on that home picks up the new
+defaults too; sessions already running are not migrated. Do not edit
+`config.toml` from another client while `override` or `unoverride` runs.
+
+`override` merges the overlay as it exists on disk, including manual additions
+such as `model_reasoning_effort = "ultra"` or `tui.theme`, into `config.toml`.
+Tables merge key by key and your comments and unrelated settings stay in place,
+with two exceptions:
+
+- `shell_environment_policy.exclude` is the union of your list and the
+  overlay's, so your own patterns keep filtering subprocess environments.
+- `[model_providers.<id>]` for the overlay's provider is replaced as a whole.
+  The overlay's `env_key` must not sit next to a stored bearer, so any key of
+  yours in that table is dropped and listed in a `WARNING` line.
+
+The merge happens in memory and is checked before anything is written: the
+result must parse, must carry every overlay key, and must not put
+`shell_environment_policy.filters` next to `exclude` or `include_only` (Codex
+rejects that combination; reconcile the table by hand first). Only then does
+`override` write the backup, and after it `config.toml`. A refused `override`
+leaves no backup behind.
+
+There is one backup per home, shared by all profiles. While it exists a second
+`override` is refused, and so are `install` and `uninstall` for the profile that
+owns it (`--dry-run` still works). If the backup is unreadable, `status` says so
+and every command except `login` and `status` stops with the path; delete the
+file to abandon the override, or restore `config.toml` by hand.
+
+To undo:
+
+```console
+$ codex-copilot unoverride --dry-run
+$ codex-copilot unoverride
+```
+
+**`unoverride` restores the `config.toml` from the backup byte for byte.** If
+`config.toml` was edited while the override was active, the edited file is
+first saved as `$CODEX_HOME/config.toml.unoverride-discarded` and a `WARNING`
+names it; merge what you want back into `config.toml` by hand, then delete it.
+`status` lists the file while it exists, `override` refuses to run until it is
+gone, and a repeated `unoverride` never overwrites it.
+
+`unoverride` needs only the backup, so it still works after the overlay,
+catalog or installation state is gone. Use the same `--profile` and
+`--codex-home` as the original override, and restart the desktop app afterward.
+
+Neither command reads the runtime token. The backup and the discarded file hold
+whatever your `config.toml` held, including any credentials you had stored
+there; keep them private.
 
 ## Approval review
 
@@ -271,25 +340,29 @@ it by hand and pass `--catalog <path>`.
   the token out of every subprocess Codex spawns for a shell tool call.
   `ignore_default_excludes` defaults to `true` in Codex, so this list is the
   only filter in effect. Being an array, it **replaces** any `exclude` list in
-  your base `config.toml` - merge yours in if you have one.
+  your base `config.toml` under `--profile copilot` - merge yours in if you have
+  one. `override` merges the two lists for you.
 - Telemetry is forced off in the overlay (`[analytics]`, `[otel]`,
   `[feedback]`). This matters here: the provider is named `OpenAI`, so an
   enabled exporter would POST to an openai.com host while the process holds
   Copilot credentials.
 - `state.json` holds no secrets, and `status` reports the token as a prefix and
-  a length only.
+  a length only. The backup and discarded files left by `override` /
+  `unoverride` hold whatever your `config.toml` already held, and nothing more.
 
 ## Rollback
 
 ```console
+$ codex-copilot unoverride       # first, if an override is active
 $ codex-copilot uninstall
 ```
 
 Removes the overlay, the catalog and `state.json` (and the profile directory, if
 empty), then prints the one-liner to clear `COPILOT_GITHUB_TOKEN` yourself. It
-does not touch your environment. Deleting
-`$CODEX_HOME/copilot.config.toml` by hand is equally valid: with the overlay
-gone, `--profile copilot` is a silent no-op.
+does not touch your environment. An override owned by this profile must be
+undone first: deleting the overlay alone does not restore `config.toml`. The
+token variable is shared by all profiles; clear it only when you no longer need
+it.
 
 ## Platform support
 
@@ -305,8 +378,10 @@ built and tested only in CI - the matrix runs `fmt`, `clippy -D warnings`,
 | --- | --- |
 | `login` | device flow, prints the token and the set-variable one-liner |
 | `install` (default) | probes the host, calibrates the catalog, writes the overlay |
-| `status` | summarises the install and checks every link |
-| `uninstall` | removes what install wrote, prints the unset one-liner |
+| `override` | backs up `config.toml`, then merges the installed overlay into it |
+| `unoverride` | restores `config.toml` from that backup, saving any later edits aside |
+| `status` | summarises the install and override state, checks every link |
+| `uninstall` | removes what install wrote (refused while this profile's override is active), prints the unset one-liner |
 
 Global: `--profile <name>` (default `copilot`), `--codex-home <dir>`,
 `--codex-bin <path>`, `--dry-run`.
