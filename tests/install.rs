@@ -156,8 +156,11 @@ fn dry_run_prints_the_overlay_and_writes_nothing() {
         .has("model_provider = \"copilot\"")
         .has("env_key = \"COPILOT_GITHUB_TOKEN\"")
         .has("exclude = [\"COPILOT_GITHUB_TOKEN\"]")
+        .has("approval_policy = \"never\"")
+        .has("default_permissions = \":danger-full-access\"")
         .has("wire_api = \"responses\"")
         .has("supports_websockets = true");
+    assert!(!r.stdout.contains("sandbox_mode ="));
     assert!(!home.path().join("copilot.config.toml").exists());
     assert!(!home.path().join("copilot_config_toml").exists());
 }
@@ -174,7 +177,9 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
         // The token is echoed once, with the one-liner the user runs.
         .has(&format!("COPILOT_GITHUB_TOKEN={TOKEN}"))
         .has("SetEnvironmentVariable")
-        .has("Auto-review  gpt-5.6-luna")
+        .has("--yolo")
+        .has("no approval prompts")
+        .has("without a sandbox")
         .has("codex --profile copilot");
 
     let text = overlay(home.path());
@@ -186,9 +191,13 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
 
     // Calibration: the seat allows astra 872k, the bundled catalog said 272k.
     let config: toml::Value = toml::from_str(&text).unwrap();
-    // The default reviewer is routed; no other approval key is written.
-    assert_eq!(config["approvals_reviewer"].as_str(), Some("auto_review"));
-    assert!(config.get("approval_policy").is_none());
+    // Yolo is the default; auto review requires an explicit opt-in.
+    assert!(config.get("approvals_reviewer").is_none());
+    assert_eq!(config["approval_policy"].as_str(), Some("never"));
+    assert_eq!(
+        config["default_permissions"].as_str(),
+        Some(":danger-full-access")
+    );
     assert!(config.get("sandbox_mode").is_none());
     assert_eq!(
         std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
@@ -203,7 +212,7 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
     assert_eq!(astra["max_context_window"], 872_000);
     assert_eq!(astra["auto_compact_token_limit"], 784_800);
     assert_eq!(astra["tool_mode"], "code_mode_only");
-    assert_eq!(astra["auto_review_model_override"], "gpt-5.6-luna");
+    assert!(astra["auto_review_model_override"].is_null());
     // gpt-5.2 is not on this seat, so it keeps what codex shipped.
     assert_eq!(cat["models"][3]["slug"], "gpt-5.2");
     assert_eq!(cat["models"][3]["context_window"], 272_000);
@@ -212,13 +221,14 @@ fn install_with_relative_home_writes_the_overlay_the_catalog_and_the_state() {
     let state = read_json(&home.path().join("copilot_config_toml/state.json"));
     assert_eq!(state["host"], stub.host());
     assert_eq!(state["model"], "gpt-6-astra");
-    assert_eq!(state["auto_review_model"], "gpt-5.6-luna");
+    assert!(state["auto_review_model"].is_null());
     assert_eq!(state["codex_version"], CODEX_VERSION);
     assert_eq!(state["models"][0]["capi_max"], 872_000);
     assert_eq!(state["models"][0]["tier_base"], 272_000);
     // No secret ever reaches state.json.
     let raw = std::fs::read_to_string(home.path().join("copilot_config_toml/state.json")).unwrap();
     assert!(!raw.contains(TOKEN) && !raw.contains("login"));
+    assert_no_review(home.path());
 }
 
 /// No reviewer routed: not in the overlay, not in the catalog, not in state.
@@ -233,18 +243,115 @@ fn assert_no_review(home: &Path) {
 }
 
 #[test]
+fn no_yolo_inherits_approval_settings_through_override_and_unoverride() {
+    let home = TempDir::new().unwrap();
+    let stub = Stub::start(&[]);
+    let original = "approval_policy = \"on-request\"\nsandbox_mode = \"workspace-write\"\napprovals_reviewer = \"user\"\n";
+    std::fs::write(home.path().join("config.toml"), original).unwrap();
+    install(home.path(), &stub, &["--no-yolo"])
+        .ok()
+        .has("Yolo         off")
+        .has("inherit Codex settings");
+    let config: toml::Value = toml::from_str(&overlay(home.path())).unwrap();
+    assert!(config.get("approval_policy").is_none());
+    assert!(config.get("default_permissions").is_none());
+    assert!(config.get("sandbox_mode").is_none());
+    assert_no_review(home.path());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        original
+    );
+
+    run(home.path(), &["override"]).ok();
+    let merged: toml::Value =
+        toml::from_str(&std::fs::read_to_string(home.path().join("config.toml")).unwrap()).unwrap();
+    assert_eq!(merged["approval_policy"].as_str(), Some("on-request"));
+    assert_eq!(merged["sandbox_mode"].as_str(), Some("workspace-write"));
+    assert_eq!(merged["approvals_reviewer"].as_str(), Some("user"));
+    run(home.path(), &["unoverride"]).ok();
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("config.toml")).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn installed_permissions_override_or_inherit_and_restore_existing_permissions() {
+    let stub = Stub::start(&[]);
+    let original = "# Personal permissions\r\napproval_policy = \"on-request\"\r\ndefault_permissions = \":read-only\"\r\n\r\n";
+    for no_yolo in [false, true] {
+        let home = TempDir::new().unwrap();
+        let path = home.path().join("config.toml");
+        std::fs::write(&path, original).unwrap();
+        let flags: &[&str] = if no_yolo { &["--no-yolo"] } else { &[] };
+        install(home.path(), &stub, flags).ok();
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+
+        run(home.path(), &["override"]).ok();
+        let merged: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            merged["approval_policy"].as_str(),
+            Some(if no_yolo { "on-request" } else { "never" })
+        );
+        assert_eq!(
+            merged["default_permissions"].as_str(),
+            Some(if no_yolo {
+                ":read-only"
+            } else {
+                ":danger-full-access"
+            })
+        );
+        assert!(merged.get("sandbox_mode").is_none());
+        run(home.path(), &["unoverride"]).ok();
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+    }
+}
+
+#[test]
+fn auto_review_without_a_model_uses_the_default_reviewer() {
+    let home = TempDir::new().unwrap();
+    let stub = Stub::start(&[]);
+    install(home.path(), &stub, &["--auto-review"])
+        .ok()
+        .has("Auto-review  gpt-5.6-luna");
+    let config: toml::Value = toml::from_str(&overlay(home.path())).unwrap();
+    assert_eq!(config["approvals_reviewer"].as_str(), Some("auto_review"));
+    assert_eq!(config["approval_policy"].as_str(), Some("never"));
+    assert_eq!(
+        config["default_permissions"].as_str(),
+        Some(":danger-full-access")
+    );
+    assert!(config.get("sandbox_mode").is_none());
+    let cat = catalog(home.path());
+    for entry in cat["models"].as_array().unwrap() {
+        if entry["slug"] == "gpt-5.2" {
+            assert!(entry["auto_review_model_override"].is_null());
+        } else {
+            assert_eq!(entry["auto_review_model_override"], "gpt-5.6-luna");
+        }
+    }
+    let state = read_json(&home.path().join("copilot_config_toml/state.json"));
+    assert_eq!(state["auto_review_model"], "gpt-5.6-luna");
+}
+
+#[test]
 fn auto_review_selects_a_real_model_and_preserves_catalog_policy() {
     let home = TempDir::new().unwrap();
     let stub = Stub::start(&[]);
-    install(home.path(), &stub, &["--no-auto-review"]).ok();
+    install(home.path(), &stub, &[]).ok();
     assert_no_review(home.path());
     let before = catalog(home.path());
-    install(home.path(), &stub, &["--auto-review-model", "gpt-5.5"])
-        .ok()
-        .has("Auto-review  gpt-5.5");
+    install(
+        home.path(),
+        &stub,
+        &["--auto-review", "gpt-5.5", "--no-yolo"],
+    )
+    .ok()
+    .has("Auto-review  gpt-5.5");
     let config: toml::Value = toml::from_str(&overlay(home.path())).unwrap();
     assert_eq!(config["approvals_reviewer"].as_str(), Some("auto_review"));
     assert!(config.get("approval_policy").is_none());
+    assert!(config.get("default_permissions").is_none());
     assert!(config.get("sandbox_mode").is_none());
     let mut after = catalog(home.path());
     for entry in after["models"].as_array_mut().unwrap() {
@@ -273,10 +380,42 @@ fn auto_review_selects_a_real_model_and_preserves_catalog_policy() {
         .ok()
         .has("review route FAIL");
 
-    // --no-auto-review restores inheritance and the original catalog bytes.
-    install(home.path(), &stub, &["--no-auto-review"]).ok();
+    // The equals form also selects the requested reviewer.
+    install(home.path(), &stub, &["--auto-review=gpt-5.5"])
+        .ok()
+        .has("Auto-review  gpt-5.5");
+    assert_eq!(
+        catalog(home.path())["models"][0]["auto_review_model_override"],
+        "gpt-5.5"
+    );
+
+    // Omitting --auto-review restores inheritance and the original catalog.
+    install(home.path(), &stub, &[]).ok();
     assert_no_review(home.path());
     assert_eq!(catalog(home.path()), before);
+}
+
+#[test]
+fn default_install_preserves_existing_catalog_review_overrides() {
+    let home = TempDir::new().unwrap();
+    let stub = Stub::start(&[]);
+    let local = home.path().join("bundled.json");
+    std::fs::write(
+        &local,
+        r#"{"models":[{"slug":"gpt-6-astra","auto_review_model_override":"existing-reviewer"},{"slug":"gpt-5.5"}]}"#,
+    )
+    .unwrap();
+    install(home.path(), &stub, &["--catalog", local.to_str().unwrap()]).ok();
+    let config: toml::Value = toml::from_str(&overlay(home.path())).unwrap();
+    assert!(config.get("approvals_reviewer").is_none());
+    let cat = catalog(home.path());
+    assert_eq!(
+        cat["models"][0]["auto_review_model_override"],
+        "existing-reviewer"
+    );
+    assert!(cat["models"][1].get("auto_review_model_override").is_none());
+    let state = read_json(&home.path().join("copilot_config_toml/state.json"));
+    assert!(state["auto_review_model"].is_null());
 }
 
 #[test]
@@ -292,11 +431,11 @@ fn an_unusable_reviewer_warns_and_installs_without_the_override() {
     ] {
         let home = TempDir::new().unwrap();
         let stub = Stub::start(&stub_args);
-        install(home.path(), &stub, &["--auto-review-model", reviewer])
+        install(home.path(), &stub, &["--auto-review", reviewer])
             .ok()
             .has("WARNING  auto review disabled")
             .has(message)
-            .has("--no-auto-review");
+            .has("omit --auto-review");
         assert_no_review(home.path());
     }
 
@@ -311,7 +450,7 @@ fn an_unusable_reviewer_warns_and_installs_without_the_override() {
         &[
             "--catalog",
             old_catalog.to_str().unwrap(),
-            "--auto-review-model",
+            "--auto-review",
             "gpt-6-astra",
         ],
     )
@@ -521,11 +660,15 @@ fn an_unusable_model_warns_with_a_remedy() {
     let home2 = TempDir::new().unwrap();
     let stub = Stub::start(&[]);
     // An unusable conversation model does not stop the reviewer being routed.
-    install(home2.path(), &stub, &["--model", "gpt-9-nope"])
-        .ok()
-        .has("is not in")
-        .has("--model")
-        .has("Auto-review  gpt-5.6-luna");
+    install(
+        home2.path(),
+        &stub,
+        &["--model", "gpt-9-nope", "--auto-review"],
+    )
+    .ok()
+    .has("is not in")
+    .has("--model")
+    .has("Auto-review  gpt-5.6-luna");
     let config: toml::Value = toml::from_str(&overlay(home2.path())).unwrap();
     assert_eq!(config["approvals_reviewer"].as_str(), Some("auto_review"));
     let state = read_json(&home2.path().join("copilot_config_toml/state.json"));

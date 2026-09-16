@@ -17,6 +17,9 @@ const DISCARDED: &str = "config.toml.unoverride-discarded";
 const BASE: &str = r#"# Personal configuration: retain this comment.
 model = "gpt-6-astra" # This model was already selected.
 model_reasoning_effort = "high"
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+approvals_reviewer = "user"
 
 [shell_environment_policy]
 exclude = ["PRIVATE_*", "SECRET_*"]
@@ -108,6 +111,8 @@ model = "gpt-6-astra"
 model_provider = "copilot"
 model_reasoning_effort = "ultra"
 model_catalog_json = {catalog_literal}
+approval_policy = "never"
+default_permissions = ":danger-full-access"
 
 [model_providers.copilot]
 name = "OpenAI"
@@ -203,6 +208,14 @@ fn unoverride_restores_the_previous_file_byte_for_byte() {
 
     run(path, &["override"]).ok();
     assert_ne!(text(path), original);
+    let merged = config(path);
+    assert_eq!(merged["approval_policy"].as_str(), Some("never"));
+    assert_eq!(
+        merged["default_permissions"].as_str(),
+        Some(":danger-full-access")
+    );
+    assert_eq!(merged["sandbox_mode"].as_str(), Some("workspace-write"));
+    assert_eq!(merged["approvals_reviewer"].as_str(), Some("user"));
     let saved: serde_json::Value =
         serde_json::from_slice(&fs::read(backup(path)).unwrap()).unwrap();
     assert_eq!(saved["version"], 1);

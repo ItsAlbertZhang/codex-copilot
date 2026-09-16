@@ -225,17 +225,29 @@ pub fn install(ctx: &Ctx, args: &InstallArgs) -> Result<()> {
 
     // --- the model we are about to write ----------------------------------
     check_model(&args.model, &facts, &host);
+    if args.no_yolo {
+        println!("Yolo         off in overlay (--no-yolo); approval policy and sandbox mode inherit Codex settings");
+    } else {
+        println!(
+            "Yolo         on (codex --yolo): no approval prompts; commands run without a sandbox."
+        );
+        println!(
+            "             Pass --no-yolo to inherit Codex's approval policy and sandbox mode."
+        );
+    }
     let mut auto_review_model = None;
-    if !args.no_auto_review {
-        let reviewer = &args.auto_review_model;
+    if let Some(reviewer) = &args.auto_review {
         match catalog::configure_auto_review(&mut calibrated, &facts, reviewer) {
             Ok(count) => {
                 println!("Auto-review  {reviewer}  (native override for {count} catalog entries)");
+                if !args.no_yolo {
+                    println!("             Not called while approval_policy = \"never\"; use --no-yolo for approval review.");
+                }
                 auto_review_model = Some(reviewer.clone());
             }
             Err(e) => println!(
                 "\nWARNING  auto review disabled: {e:#}. Pick another with \
-                 --auto-review-model <slug>, or pass --no-auto-review."
+                 --auto-review <MODEL>, or omit --auto-review."
             ),
         }
     }
@@ -245,6 +257,7 @@ pub fn install(ctx: &Ctx, args: &InstallArgs) -> Result<()> {
     let overlay_text = overlay::render(&overlay::Params {
         profile: &ctx.profile,
         model: &args.model,
+        yolo: !args.no_yolo,
         auto_review: auto_review_model.is_some(),
         host: &host,
         codex_version: &codex_version,
@@ -468,7 +481,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
             "review route",
             mappings_ok && reviewer_ok,
             reviewer.clone(),
-            Some(format!("re-run install --auto-review-model {reviewer}")),
+            Some(format!("re-run install --no-yolo --auto-review {reviewer}")),
         );
     }
 
@@ -486,7 +499,7 @@ pub fn status(ctx: &Ctx) -> Result<()> {
                     "review model",
                     facts.get(reviewer).is_some_and(|f| f.policy_ok() && f.ws),
                     reviewer.clone(),
-                    Some("re-run install with an enabled --auto-review-model <slug>".into()),
+                    Some("re-run install --no-yolo with an enabled --auto-review <MODEL>".into()),
                 );
             }
             let f = facts.get(&state.model);

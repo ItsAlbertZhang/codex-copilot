@@ -15,6 +15,7 @@ use crate::{PROVIDER_ID, TOKEN_ENV};
 pub struct Params<'a> {
     pub profile: &'a str,
     pub model: &'a str,
+    pub yolo: bool,
     pub auto_review: bool,
     pub host: &'a str,
     pub codex_version: &'a str,
@@ -47,6 +48,7 @@ model_catalog_json = "{catalog}"
 # CAPI does not stream reasoning summaries.
 model_reasoning_summary = "none"
 check_for_update_on_startup = false
+{yolo_config}
 {reviewer_config}
 
 [model_providers.{id}]
@@ -113,6 +115,11 @@ exclude = ["{TOKEN_ENV}"]
         codex = esc(p.codex_version),
         profile = esc(p.profile),
         model = esc(p.model),
+        yolo_config = if p.yolo {
+            "# Equivalent to codex --yolo: no approval prompts, commands run without a sandbox.\napproval_policy = \"never\"\ndefault_permissions = \":danger-full-access\""
+        } else {
+            ""
+        },
         reviewer_config = if p.auto_review {
             "# Use the approval model selected in the local catalog.\napprovals_reviewer = \"auto_review\""
         } else {
@@ -137,12 +144,13 @@ mod tests {
     use std::path::PathBuf;
     use toml::Value;
 
-    fn rendered() -> (String, Value) {
+    fn render_with(yolo: bool, auto_review: bool) -> (String, Value) {
         let path = PathBuf::from(r"C:\Users\x\.codex\copilot_config_toml\models-catalog.json");
         let text = render(&Params {
             profile: "copilot",
             model: "gpt-6-astra",
-            auto_review: false,
+            yolo,
+            auto_review,
             host: "https://api.enterprise.githubcopilot.com/",
             codex_version: "0.154.0",
             catalog_path: &path,
@@ -152,6 +160,10 @@ mod tests {
         (text, parsed)
     }
 
+    fn rendered() -> (String, Value) {
+        render_with(true, false)
+    }
+
     #[test]
     fn the_overlay_has_exactly_the_documented_keys() {
         let (_, doc) = rendered();
@@ -159,6 +171,12 @@ mod tests {
         assert_eq!(doc["model_provider"].as_str(), Some("copilot"));
         assert_eq!(doc["model_reasoning_summary"].as_str(), Some("none"));
         assert_eq!(doc["check_for_update_on_startup"].as_bool(), Some(false));
+        assert_eq!(doc["approval_policy"].as_str(), Some("never"));
+        assert_eq!(
+            doc["default_permissions"].as_str(),
+            Some(":danger-full-access")
+        );
+        assert!(doc.get("sandbox_mode").is_none());
         assert!(doc.get("approvals_reviewer").is_none());
         assert!(doc["model_catalog_json"]
             .as_str()
@@ -225,6 +243,28 @@ mod tests {
                 .and_then(Value::as_str),
             Some("COPILOT_GITHUB_TOKEN")
         );
+    }
+
+    #[test]
+    fn yolo_and_auto_review_are_configured_independently() {
+        for yolo in [false, true] {
+            for auto_review in [false, true] {
+                let (_, doc) = render_with(yolo, auto_review);
+                assert_eq!(
+                    doc.get("approval_policy").and_then(Value::as_str),
+                    yolo.then_some("never")
+                );
+                assert_eq!(
+                    doc.get("default_permissions").and_then(Value::as_str),
+                    yolo.then_some(":danger-full-access")
+                );
+                assert!(doc.get("sandbox_mode").is_none());
+                assert_eq!(
+                    doc.get("approvals_reviewer").and_then(Value::as_str),
+                    auto_review.then_some("auto_review")
+                );
+            }
+        }
     }
 
     #[test]

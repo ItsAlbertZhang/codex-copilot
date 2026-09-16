@@ -119,13 +119,19 @@ pub struct InstallArgs {
     #[arg(long, value_name = "ID", default_value = DEFAULT_MODEL)]
     pub model: String,
 
-    /// Model that answers Codex's automatic approval reviews.
-    #[arg(long, value_name = "ID", default_value = DEFAULT_AUTO_REVIEW)]
-    pub auto_review_model: String,
+    /// Leave approval policy and sandbox mode to Codex instead of configuring --yolo.
+    #[arg(long)]
+    pub no_yolo: bool,
 
-    /// Configure no reviewer; inherit Codex's own approval review setting.
-    #[arg(long, conflicts_with = "auto_review_model")]
-    pub no_auto_review: bool,
+    /// Enable automatic approval review with an optional model.
+    #[arg(
+        long,
+        value_name = "MODEL",
+        num_args = 0..=1,
+        default_missing_value = DEFAULT_AUTO_REVIEW,
+        help = format!("Enable automatic approval review (no MODEL: {DEFAULT_AUTO_REVIEW}; only useful with --no-yolo)")
+    )]
+    pub auto_review: Option<String>,
 
     /// Window every calibrated model is budgeted against: `max` (everything
     /// CAPI accepts, billed ~2x above the base tier), `base` (the
@@ -163,8 +169,8 @@ impl Default for InstallArgs {
         Self {
             auth: AuthArgs::default(),
             model: DEFAULT_MODEL.to_string(),
-            auto_review_model: DEFAULT_AUTO_REVIEW.to_string(),
-            no_auto_review: false,
+            no_yolo: false,
+            auto_review: None,
             context_window: DEFAULT_WINDOW.to_string(),
             model_window: Vec::new(),
             catalog: None,
@@ -225,14 +231,53 @@ mod tests {
         };
         let d = InstallArgs::default();
         assert_eq!(a.model, d.model);
-        assert_eq!(a.auto_review_model, d.auto_review_model);
-        assert_eq!(a.no_auto_review, d.no_auto_review);
+        assert_eq!(a.no_yolo, d.no_yolo);
+        assert_eq!(a.auto_review, d.auto_review);
+        assert!(!a.no_yolo);
+        assert!(a.auto_review.is_none());
         assert_eq!(a.context_window, d.context_window);
         assert_eq!(a.model_window, d.model_window);
         assert_eq!(a.catalog, d.catalog);
         assert_eq!(a.host, d.host);
         assert_eq!(a.auth.token, d.auth.token);
         assert_eq!(a.auth.token_stdin, d.auth.token_stdin);
+    }
+
+    #[test]
+    fn auto_review_is_opt_in_with_an_optional_model() {
+        for (flags, reviewer, no_yolo) in [
+            (vec!["--auto-review"], DEFAULT_AUTO_REVIEW, false),
+            (vec!["--auto-review", "gpt-5.5"], "gpt-5.5", false),
+            (vec!["--auto-review=gpt-5.5"], "gpt-5.5", false),
+            (
+                vec!["--auto-review", "--no-yolo"],
+                DEFAULT_AUTO_REVIEW,
+                true,
+            ),
+            (
+                vec!["--no-yolo", "--auto-review", "gpt-5.5"],
+                "gpt-5.5",
+                true,
+            ),
+        ] {
+            let cli =
+                Cli::try_parse_from(["codex-copilot", "install"].into_iter().chain(flags)).unwrap();
+            let Some(Cmd::Install(a)) = cli.command else {
+                panic!("expected install")
+            };
+            assert_eq!(a.auto_review.as_deref(), Some(reviewer));
+            assert_eq!(a.no_yolo, no_yolo);
+        }
+    }
+
+    #[test]
+    fn no_yolo_does_not_enable_auto_review() {
+        let cli = Cli::try_parse_from(["codex-copilot", "install", "--no-yolo"]).unwrap();
+        let Some(Cmd::Install(a)) = cli.command else {
+            panic!("expected install")
+        };
+        assert!(a.no_yolo);
+        assert!(a.auto_review.is_none());
     }
 
     #[test]
@@ -246,12 +291,21 @@ mod tests {
             "--no-copy",
             "--set-default",
             "--skip-auto-review",
+            "--auto-review-model",
+            "--no-auto-review",
         ] {
             assert!(
                 Cli::try_parse_from(["codex-copilot", "install", flag]).is_err(),
                 "{flag} still parses"
             );
         }
+        assert!(Cli::try_parse_from([
+            "codex-copilot",
+            "install",
+            "--auto-review-model",
+            "gpt-5.5",
+        ])
+        .is_err());
         assert!(Cli::try_parse_from(["codex-copilot", "doctor"]).is_err());
         assert!(Cli::try_parse_from(["codex-copilot", "token"]).is_err());
     }
