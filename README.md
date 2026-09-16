@@ -168,6 +168,13 @@ first `GET /models` that answers 200 wins), downloads the `models.json` bundled
 with your `codex --version`, calibrates it, and writes the profile. Add
 `--dry-run` to see all of it without writing anything.
 
+By default the overlay sets `approval_policy = "never"` and
+`default_permissions = ":danger-full-access"`, equivalent to Codex's `--yolo`:
+Codex does not prompt for approvals, and commands run without a sandbox. This applies
+to both `--profile copilot` and the configuration merged by `override`. Pass
+`install --no-yolo` to omit both keys and inherit your base `config.toml`
+settings or Codex's own defaults.
+
 ## What it writes
 
 | Path | What |
@@ -266,15 +273,25 @@ there; keep them private.
 
 ## Approval review
 
-`install` points Codex's automatic approval review at a real CAPI model, and
-never prompts: `gpt-5.6-luna` by default, `--auto-review-model <ID>` for
-another, `--no-auto-review` to configure none and inherit `config.toml`'s.
+`install` leaves automatic approval review unconfigured by default: it omits
+`approvals_reviewer` from the overlay and preserves the catalog's existing
+`auto_review_model_override` values. Pass `--auto-review` to use `gpt-5.6-luna`,
+or `--auto-review <MODEL>` to choose another CAPI model:
 
-It writes `approvals_reviewer = "auto_review"` in the overlay and
+```console
+$ codex-copilot install --no-yolo --auto-review
+$ codex-copilot install --no-yolo --auto-review gpt-5.6-sol
+```
+
+When enabled, it writes `approvals_reviewer = "auto_review"` in the overlay and
 `"auto_review_model_override": "<ID>"` into every CAPI-served catalog entry, so
 switching conversation models keeps the reviewer - that is
 [Codex's own model selection](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/guardian/review.rs#L872),
-not an alias or a proxy. Slugs, Guardian messages and approval settings stay.
+not an alias or a proxy. Slugs and Guardian messages stay.
+
+With `approval_policy = "never"`, Codex produces no approval requests and
+`approvals_reviewer` is never called. Auto review therefore only has an effect
+when yolo is disabled and the effective approval policy can request approval.
 
 A reviewer missing from CAPI or the catalog, disabled, or without
 `ws:/responses` warns and is skipped; the rest of the install still lands.
@@ -331,6 +348,9 @@ it by hand and pass `--catalog <path>`.
 
 ## Security
 
+- The default yolo settings allow commands to run without approval prompts or
+  a sandbox. Use `install --no-yolo` to leave approval and sandbox settings to
+  your base configuration or Codex defaults.
 - The token lives in one place: a **user environment variable you set**. This
   tool prints it once and forgets it; the overlay stores only the variable's
   name (`env_key = "COPILOT_GITHUB_TOKEN"`), so the value is read fresh from the
