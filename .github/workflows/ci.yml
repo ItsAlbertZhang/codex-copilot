@@ -17,6 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # The end-to-end tests run a Node stub in place of the real CAPI host.
       - uses: actions/setup-node@v4
         with:
           node-version: "24"

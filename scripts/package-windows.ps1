@@ -41,19 +41,23 @@ try {
         throw "Portable build failed. Ensure 'rustup target add $Target' and the matching Visual C++ tools are installed."
     }
 
+    $name = 'codex-copilot'
+    $expectedMachine = if ($architecture -eq 'x64') { 0x8664 } else { 0xAA64 }
+    $distRoot = Join-Path $projectRoot 'dist'
+    New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
+
+    $executable = Join-Path $buildRoot "$Target/release/$name.exe"
+    $header = [System.IO.File]::ReadAllBytes($executable)
+    $peOffset = [System.BitConverter]::ToInt32($header, 0x3C)
+
     # Nothing else checks the ARM64 binary (no ARM runner), so assert the PE
     # machine field of what was just built matches the requested target.
-    $executable = Join-Path $buildRoot "$Target/release/codex-copilot.exe"
-    $header = [System.IO.File]::ReadAllBytes($executable)
-    $machine = [System.BitConverter]::ToUInt16($header, [System.BitConverter]::ToInt32($header, 0x3C) + 4)
-    $expectedMachine = if ($architecture -eq 'x64') { 0x8664 } else { 0xAA64 }
+    $machine = [System.BitConverter]::ToUInt16($header, $peOffset + 4)
     if ($machine -ne $expectedMachine) {
         throw ('Built {0} has PE machine 0x{1:X4}, expected 0x{2:X4} for {3}.' -f $executable, $machine, $expectedMachine, $Target)
     }
 
-    $artifactName = "codex-copilot-$($package.version)-windows-$architecture.exe"
-    $distRoot = Join-Path $projectRoot 'dist'
-    New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
+    $artifactName = "$name-$($package.version)-windows-$architecture.exe"
     $artifact = Join-Path $distRoot $artifactName
     Copy-Item -LiteralPath $executable -Destination $artifact -Force
 
