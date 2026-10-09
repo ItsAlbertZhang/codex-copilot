@@ -1,30 +1,57 @@
 [package]
 name = "codex-copilot"
-version = "1.1.0"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.88"
-description = "Wire an installed OpenAI Codex CLI to GitHub Copilot CAPI (ws:/responses) as a custom model provider."
+description = "Local Responses WebSocket relay that lets an installed OpenAI Codex CLI use GitHub Copilot CAPI, with stable item ids."
 license = "MIT"
 publish = false
+default-run = "codex-copilot"
+
+[lib]
+name = "codex_copilot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codex-copilot"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive"] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
-# `preserve_order`: the model catalog is rewritten entry by entry and written
-# back out; a Codex models.json should not come back alphabetised.
+# `preserve_order`: relayed Responses frames are rewritten in place and must
+# come out with their keys in the original order.
 serde_json = { version = "1", features = ["preserve_order"] }
-# Parse-validation of the overlay we just wrote (`status`).
 toml = "0.9"
-# Preserve personal config comments and replace files without partial writes.
+# Merge managed keys into a config.toml that Codex also writes to, without
+# touching the user's comments or the keys Codex added.
 toml_edit = "0.25"
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+axum = { version = "0.8", features = ["ws", "http1", "tokio", "json"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# The proxy matcher reqwest itself uses, so `/healthz` and `status --probe`
+# can say which proxy (if any) the upstream goes through (reqwest already
+# depends on it).
+hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
+uuid = { version = "1", features = ["v7"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
+
+[target.'cfg(windows)'.dependencies]
+# Keeps the CLI's own stdio handles out of the detached background relay
+# (`GetHandleInformation` / `SetHandleInformation`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 [dependencies.reqwest]
 version = "0.12"
 default-features = false
-features = ["blocking", "json", "rustls-tls-native-roots"]
+# `system-proxy`: like Codex's own client, the proxy variables are read and,
+# when none is set, the Windows Internet Settings / macOS system proxy is used.
+features = ["blocking", "json", "rustls-tls-native-roots", "stream", "system-proxy"]
 
 [profile.release]
 opt-level = "z"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Sibling of scripts/package-windows.ps1: one portable binary plus its checksum.
+# Sibling of scripts/package-windows.ps1: the portable codex-copilot binary
+# plus its checksum.
 set -euo pipefail
 
 if [ "$(uname -s)" != 'Darwin' ]; then
@@ -29,18 +30,21 @@ version=$(cargo metadata --locked --no-deps --format-version 1 |
 build_root=$project_root/target/portable
 cargo build --locked --release --target "$target" --target-dir "$build_root"
 
-# Nothing else checks the cross-built binary (a runner is one architecture), so
-# assert the Mach-O architecture of what was just built matches the target.
-executable=$build_root/$target/release/codex-copilot
+dist_root=$project_root/dist
+mkdir -p "$dist_root"
+
+binary=codex-copilot
+
+# Nothing else checks the cross-built binary (a runner is one architecture),
+# so assert the Mach-O architecture of what was just built matches the target.
+executable=$build_root/$target/release/$binary
 built_machine=$(lipo -archs "$executable")
 if [ "$built_machine" != "$machine" ]; then
     echo "Built $executable is $built_machine, expected $machine for $target." >&2
     exit 1
 fi
 
-artifact_name=codex-copilot-$version-macos-$architecture
-dist_root=$project_root/dist
-mkdir -p "$dist_root"
+artifact_name=$binary-$version-macos-$architecture
 artifact=$dist_root/$artifact_name
 cp -f "$executable" "$artifact"
 chmod +x "$artifact"

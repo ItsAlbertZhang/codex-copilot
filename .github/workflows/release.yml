@@ -39,7 +39,7 @@ jobs:
           if ($env:GITHUB_REF_NAME -ne "v$version") {
             throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version."
           }
-      - name: Build portable executable
+      - name: Build portable executables
         shell: pwsh
         run: ./scripts/package-windows.ps1 -Target '${{ matrix.target }}'
       - name: Test release binary (native x64)
@@ -52,7 +52,7 @@ jobs:
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
-          $exe = Get-ChildItem dist/*.exe | Select-Object -First 1
+          $exe = Get-ChildItem dist/codex-copilot-[0-9]*.exe | Select-Object -First 1
           & $exe.FullName --version
           if ($LASTEXITCODE -ne 0) { throw 'Portable version check failed.' }
           & $exe.FullName --help
@@ -60,6 +60,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ matrix.target }}
+          # The executable and its checksum.
           path: |
             dist/*.exe
             dist/*.exe.sha256
@@ -89,7 +90,7 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version." >&2
             exit 1
           fi
-      - name: Build portable binary
+      - name: Build portable binaries
         run: ./scripts/package-macos.sh '${{ matrix.target }}'
       - name: Test release binary (native arm64)
         if: matrix.target == 'aarch64-apple-darwin'
@@ -97,12 +98,13 @@ jobs:
       - name: Smoke test portable binary (native arm64)
         if: matrix.target == 'aarch64-apple-darwin'
         run: |
-          binary=$(ls dist/codex-copilot-*-macos-arm64)
+          binary=$(ls dist/codex-copilot-[0-9]*-macos-arm64)
           "$binary" --version
           "$binary" --help
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.target }}
+          # The binary and its checksum.
           path: dist/codex-copilot-*
           if-no-files-found: error
 

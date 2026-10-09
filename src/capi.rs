@@ -35,6 +35,8 @@ pub const DEFAULT_HOSTS: [&str; 4] = [
     "https://api.githubcopilot.com",
 ];
 
+/// The client for requests to a CAPI host, or to the GitHub OAuth base of the
+/// device flow.
 pub fn client() -> Result<Client> {
     Client::builder()
         .user_agent(USER_AGENT)
@@ -56,15 +58,10 @@ fn identity(rb: RequestBuilder, token: &str) -> RequestBuilder {
         .header("x-initiator", INITIATOR)
 }
 
-/// What one `/models` entry says about a model, reduced to what calibration
-/// and `status` act on.
+/// What one `/models` entry says about a model, reduced to what `status`
+/// acts on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModelFacts {
-    /// Largest prompt this seat may send: the `long_context` tier ceiling when
-    /// the model has one, else the standard tier's, else `capabilities.limits`.
-    pub capi_max: Option<u64>,
-    /// Standard-price tier ceiling. Prompts above it cost roughly 2x.
-    pub tier_base: Option<u64>,
     pub policy: Option<String>,
     /// Advertises `ws:/responses`.
     pub ws: bool,
@@ -89,50 +86,12 @@ struct Entry {
     supported_endpoints: Vec<String>,
     #[serde(default)]
     policy: Option<Policy>,
-    #[serde(default)]
-    capabilities: Option<Capabilities>,
-    #[serde(default)]
-    billing: Option<Billing>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Policy {
     #[serde(default)]
     state: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Capabilities {
-    #[serde(default)]
-    limits: Option<Limits>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Limits {
-    #[serde(default)]
-    max_prompt_tokens: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Billing {
-    #[serde(default)]
-    token_prices: Option<TokenPrices>,
-}
-
-/// `default` is the standard tier; `long_context`, when published, is the ~2x
-/// tier CAPI switches to on prompt size alone.
-#[derive(Debug, Deserialize)]
-struct TokenPrices {
-    #[serde(default)]
-    default: Option<Tier>,
-    #[serde(default)]
-    long_context: Option<Tier>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Tier {
-    #[serde(default)]
-    max_prompt_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,28 +108,9 @@ pub fn parse_models(body: &str) -> Result<Facts> {
     anyhow::ensure!(!parsed.data.is_empty(), "/models returned an empty list");
     let mut out = Facts::new();
     for e in parsed.data {
-        let prices = e.billing.as_ref().and_then(|b| b.token_prices.as_ref());
-        let tier = |long: bool| -> Option<u64> {
-            let t = prices.and_then(|p| {
-                if long {
-                    p.long_context.as_ref()
-                } else {
-                    p.default.as_ref()
-                }
-            })?;
-            t.max_prompt_tokens
-        };
-        let capability_max = e
-            .capabilities
-            .as_ref()
-            .and_then(|c| c.limits.as_ref())
-            .and_then(|l| l.max_prompt_tokens);
-        let base = tier(false).or(capability_max);
         out.insert(
             e.id,
             ModelFacts {
-                capi_max: tier(true).or(base),
-                tier_base: base,
                 policy: e.policy.and_then(|p| p.state),
                 ws: e.supported_endpoints.iter().any(|s| s == WS_RESPONSES),
             },
@@ -204,10 +144,22 @@ impl Probe {
     }
 }
 
-/// `GET <host>/models` with the identity headers and the raw GitHub token.
-pub fn probe_host(client: &Client, host: &str, token: &str) -> Probe {
+/// `GET <host>/models` with the identity headers and the raw GitHub token,
+/// through [`client`].
+pub fn probe_host(host: &str, token: &str) -> Probe {
     let host = host.trim_end_matches('/').to_string();
     let url = format!("{host}/models");
+    let client = match client() {
+        Ok(client) => client,
+        Err(e) => {
+            return Probe {
+                host,
+                status: None,
+                note: format!("{e:#}"),
+                facts: None,
+            }
+        }
+    };
     let resp = match identity(client.get(&url), token).send() {
         Ok(r) => r,
         Err(e) => {
@@ -248,10 +200,10 @@ pub fn probe_host(client: &Client, host: &str, token: &str) -> Probe {
 /// Walks `hosts` in preference order and stops at the first one that answers
 /// 200 with a parseable model list. Every attempt is returned, so the failures
 /// can be reported when none succeeds.
-pub fn discover(client: &Client, hosts: &[String], token: &str) -> Vec<Probe> {
+pub fn discover(hosts: &[String], token: &str) -> Vec<Probe> {
     let mut out = Vec::new();
     for host in hosts {
-        let probe = probe_host(client, host, token);
+        let probe = probe_host(host, token);
         let done = probe.ok();
         out.push(probe);
         if done {
@@ -271,43 +223,19 @@ pub fn pick(probes: &[Probe]) -> Option<usize> {
 mod tests {
     use super::*;
 
-    const BODY: &str = r#"{"object":"list","data":[
-        {"id":"gpt-6-astra","supported_endpoints":["/responses","ws:/responses"],
-         "policy":{"state":"enabled"},
-         "capabilities":{"limits":{"max_prompt_tokens":872000}},
-         "billing":{"token_prices":{"default":{"max_prompt_tokens":272000},
-                                    "long_context":{"max_prompt_tokens":872000}}}},
-        {"id":"gpt-5.4-mini","supported_endpoints":["/responses"],
-         "policy":{"state":"disabled"},
-         "billing":{"token_prices":{"default":{"max_prompt_tokens":272000}}}},
-        {"id":"bare-model"}]}"#;
-
     #[test]
-    fn long_context_wins_over_the_base_tier() {
-        let f = parse_models(BODY).unwrap();
-        let astra = &f["gpt-6-astra"];
-        assert_eq!(astra.capi_max, Some(872_000));
-        assert_eq!(astra.tier_base, Some(272_000));
-        assert!(astra.ws && astra.policy_ok());
-    }
-
-    #[test]
-    fn a_model_without_a_long_tier_falls_back_to_the_base_one() {
-        let f = parse_models(BODY).unwrap();
-        let mini = &f["gpt-5.4-mini"];
-        assert_eq!(mini.capi_max, Some(272_000));
-        assert_eq!(mini.tier_base, Some(272_000));
-        assert!(!mini.ws);
-        assert!(!mini.policy_ok());
-    }
-
-    #[test]
-    fn a_bare_entry_is_listed_with_nothing_claimed() {
-        let f = parse_models(BODY).unwrap();
-        let bare = &f["bare-model"];
-        assert_eq!(bare.capi_max, None);
+    fn each_entry_says_its_policy_and_websocket_support() {
+        let body = r#"{"object":"list","data":[
+            {"id":"gpt-6-astra","supported_endpoints":["/responses","ws:/responses"],
+             "policy":{"state":"enabled"}},
+            {"id":"gpt-5.4-mini","supported_endpoints":["/responses"],
+             "policy":{"state":"disabled"}},
+            {"id":"bare-model"}]}"#;
+        let f = parse_models(body).unwrap();
+        assert!(f["gpt-6-astra"].ws && f["gpt-6-astra"].policy_ok());
+        assert!(!f["gpt-5.4-mini"].ws && !f["gpt-5.4-mini"].policy_ok());
         // No policy block means no policy gate, not a refusal.
-        assert!(bare.policy_ok());
+        assert!(f["bare-model"].policy_ok());
     }
 
     #[test]

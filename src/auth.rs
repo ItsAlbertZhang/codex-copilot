@@ -118,14 +118,76 @@ pub fn print_token(token: &Token) {
 }
 
 /// The per-shell one-liners that set the variable for the current user.
+///
+/// The token is quoted for each shell: a GitHub token is `gho_...` or
+/// `ghp_...` today, but one given with `--token` or in the environment can be
+/// anything without whitespace, and a `$`, a backtick or a quote in it would
+/// otherwise be run by the shell the user pastes the line into. Tokens made of
+/// plain characters print unquoted (PowerShell: in double quotes), as before.
+/// The bash and zsh lines append with `printf '%s\n'`: zsh's `echo` would
+/// interpret backslashes in the token.
 pub fn set_commands(token: &str) -> Vec<String> {
+    set_lines(
+        &ps_quote(token),
+        &sh_quote(&format!("export {TOKEN_ENV}={}", sh_quote(token))),
+    )
+}
+
+/// The same one-liners with `placeholder` left as it is, for the user to
+/// replace with a token they hold (`install` never echoes one it was given).
+pub fn set_commands_template(placeholder: &str) -> Vec<String> {
+    set_lines(
+        &format!("\"{placeholder}\""),
+        &format!("'export {TOKEN_ENV}={placeholder}'"),
+    )
+}
+
+fn set_lines(powershell_value: &str, sh_line: &str) -> Vec<String> {
     vec![
         format!(
-            "PowerShell   [Environment]::SetEnvironmentVariable(\"{TOKEN_ENV}\", \"{token}\", \"User\")"
+            "PowerShell   [Environment]::SetEnvironmentVariable(\"{TOKEN_ENV}\", \
+             {powershell_value}, \"User\")"
         ),
-        format!("bash         echo 'export {TOKEN_ENV}={token}' >> ~/.profile"),
-        format!("zsh          echo 'export {TOKEN_ENV}={token}' >> ~/.zshrc"),
+        format!("bash         printf '%s\\n' {sh_line} >> ~/.profile"),
+        format!("zsh          printf '%s\\n' {sh_line} >> ~/.zshrc"),
     ]
+}
+
+/// Whether `text` needs no quoting as a POSIX shell word, nor inside a
+/// PowerShell double-quoted string.
+fn is_plain(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-.,/:@%+=".contains(c))
+}
+
+/// `text` as one POSIX shell word: single quotes, an embedded `'` as `'\''`.
+fn sh_quote(text: &str) -> String {
+    if is_plain(text) {
+        return text.to_string();
+    }
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// `token` as one PowerShell string literal. Plain tokens keep the double
+/// quotes of the documented one-liner; anything else is single-quoted, where
+/// nothing expands and a quote is doubled. PowerShell also reads the
+/// typographic single quotes (U+2018 to U+201B) as quotes, so those are
+/// doubled as well.
+fn ps_quote(token: &str) -> String {
+    if is_plain(token) {
+        return format!("\"{token}\"");
+    }
+    let mut out = String::from("'");
+    for c in token.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// The matching removal one-liners, printed by `uninstall`.
@@ -294,8 +356,43 @@ mod tests {
     fn the_set_and_unset_one_liners_name_the_variable() {
         let set = set_commands("gho_tok");
         assert!(set[0].contains("SetEnvironmentVariable") && set[0].contains("gho_tok"));
+        assert!(set[0].contains("\"gho_tok\""), "{}", set[0]);
         assert!(set[1].contains("export COPILOT_GITHUB_TOKEN=gho_tok"));
         assert!(unset_commands()[0].contains("$null"));
+        let template = set_commands_template("<your token>");
+        assert!(template[0].contains("\"<your token>\""), "{}", template[0]);
+        assert!(
+            template[1].contains("TOKEN=<your token>' >>"),
+            "{}",
+            template[1]
+        );
+    }
+
+    #[test]
+    fn the_token_is_quoted_for_each_shell() {
+        let set = set_commands(r"a$b'c`d\e");
+        // PowerShell: single quotes, nothing expands, the quote is doubled.
+        assert!(
+            set[0].contains(r#"("COPILOT_GITHUB_TOKEN", 'a$b''c`d\e', "User")"#),
+            "{}",
+            set[0]
+        );
+        // bash and zsh: the value is quoted for the profile, then the whole
+        // line is quoted for `printf`.
+        let line = r"'export COPILOT_GITHUB_TOKEN='\''a$b'\''\'\'''\''c`d\e'\'''";
+        assert_eq!(
+            set[1],
+            format!(r"bash         printf '%s\n' {line} >> ~/.profile")
+        );
+        assert_eq!(
+            set[2],
+            format!(r"zsh          printf '%s\n' {line} >> ~/.zshrc")
+        );
+        // Typographic quotes end a PowerShell single-quoted string too.
+        assert_eq!(ps_quote("a\u{2019}b"), "'a\u{2019}\u{2019}b'");
+        assert_eq!(sh_quote("gho_x-1.2"), "gho_x-1.2");
+        assert_eq!(sh_quote("it's"), r"'it'\''s'");
+        assert_eq!(sh_quote(""), "''");
     }
 
     #[test]
