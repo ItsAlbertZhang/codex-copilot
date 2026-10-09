@@ -60,8 +60,10 @@ type Upstream = tokio_tungstenite::WebSocketStream<reqwest::Upgraded>;
 #[derive(Debug)]
 enum DialError {
     /// The upstream answered the handshake with something other than 101:
-    /// its status, headers and body, for [`mirror_refusal`].
-    Refused(StatusCode, HeaderMap, Bytes),
+    /// its status, headers and body, for [`mirror_refusal`]. Boxed so the
+    /// `Err` is not many times the size of the `Ok` (clippy's
+    /// `result_large_err`).
+    Refused(Box<(StatusCode, HeaderMap, Bytes)>),
     /// No answer, or a broken one; the message names the cause.
     Failed(String),
 }
@@ -122,7 +124,8 @@ pub(super) async fn open(
     let connect = dial(shared, &url, client_headers);
     let (upstream, handshake) = match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
         Ok(Ok(pair)) => pair,
-        Ok(Err(DialError::Refused(status, headers, body))) => {
+        Ok(Err(DialError::Refused(refusal))) => {
+            let (status, headers, body) = *refusal;
             warn!(conn, %url, %status, "upstream refused the WebSocket handshake");
             return mirror_refusal(status, &headers, body);
         }
@@ -192,11 +195,11 @@ async fn dial(
     let status = reply.status();
     if status != StatusCode::SWITCHING_PROTOCOLS {
         let headers = reply.headers().clone();
-        return Err(DialError::Refused(
+        return Err(DialError::Refused(Box::new((
             status,
             headers,
             refusal_body(reply).await,
-        ));
+        ))));
     }
     let accepted = reply
         .headers()

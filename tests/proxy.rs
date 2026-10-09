@@ -1165,14 +1165,20 @@ async fn a_refused_connect_is_a_502_that_names_the_proxy() {
 async fn no_proxy_keeps_the_upstream_off_the_proxy() {
     let (upstream, _seen) = fake_upstream().await;
     let (proxy, through) = fake_proxy(ProxyMode::Forward(upstream)).await;
-    // `0.0.0.0` is not a loopback name, so only NO_PROXY keeps it off the
-    // proxy (which would reach the fake gateway). Dialed directly it fails
-    // at once and locally on every OS: a port that is bound but not
-    // listening (refused), or no connection to `0.0.0.0` at all (Windows).
+    // `[::ffff:127.0.0.1]` is not a loopback address to the relay (as an
+    // IPv6 address only `::1` is), so only NO_PROXY keeps it off the proxy
+    // (which would reach the fake gateway). Dialed directly it fails at
+    // once and locally on every OS: a port that is bound but not listening
+    // refuses on a dual-stack host (Linux, macOS), and a v6-only socket
+    // cannot connect to a mapped v4 address at all (Windows). `0.0.0.0`
+    // was tried first and hangs until the timeout on macOS arm64.
     let closed = TcpSocket::new_v4().unwrap();
     closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let origin = format!("http://0.0.0.0:{}", closed.local_addr().unwrap().port());
-    let proxy = via(format!("http://{proxy}"), "localhost, 0.0.0.0/8");
+    let origin = format!(
+        "http://[::ffff:127.0.0.1]:{}",
+        closed.local_addr().unwrap().port()
+    );
+    let proxy = via(format!("http://{proxy}"), "localhost, ::ffff:0:0/96");
     let relay = start_relay_with(&origin, proxy).await;
     assert_eq!(health_of(&relay).await["proxy"], Value::Null);
 
