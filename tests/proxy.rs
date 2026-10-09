@@ -1,5 +1,5 @@
 //! End-to-end relay tests against an in-process fake Copilot gateway. Nothing
-//! leaves 127.0.0.1.
+//! leaves this machine, and all but one test stay on 127.0.0.1.
 //!
 //! The fake answers every `response.create` frame, and every HTTP
 //! `POST /responses`, the way Copilot does: a fresh opaque id on every event
@@ -14,7 +14,7 @@
 //! [`ProxyConfig::proxy`]; the process environment is never touched.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,7 +33,7 @@ use codex_copilot::proxy::{bind, ProxyConfig, ProxyHandle, ProxyOverride};
 use futures_util::{stream, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -75,12 +75,17 @@ struct HttpSeen {
 type Record = Arc<Mutex<Seen>>;
 
 async fn fake_upstream() -> (SocketAddr, Record) {
+    fake_upstream_on(Ipv4Addr::LOCALHOST.into()).await
+}
+
+/// [`fake_upstream`] listening on `ip`.
+async fn fake_upstream_on(ip: IpAddr) -> (SocketAddr, Record) {
     let seen = Record::default();
     let app = Router::new()
         .route("/responses", any(fake_responses))
         .route("/alpha/search", post(fake_search))
         .with_state(seen.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind((ip, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let listener = listener.tap_io(|tcp| {
         let _ = tcp.set_nodelay(true);
@@ -1161,41 +1166,45 @@ async fn a_refused_connect_is_a_502_that_names_the_proxy() {
     }
 }
 
+/// This machine's own non-loopback IPv4 address: the one it would send from
+/// to the outside. Connecting a UDP socket only picks a route; nothing is
+/// sent. `None` on a machine without one (no route out).
+fn own_address() -> Option<IpAddr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect(("192.0.2.1", 80)).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 #[tokio::test]
 async fn no_proxy_keeps_the_upstream_off_the_proxy() {
-    let (upstream, _seen) = fake_upstream().await;
+    // The upstream must not be a loopback address to the relay, so that only
+    // NO_PROXY keeps it off the proxy (which would reach the fake gateway
+    // too): the fake gateway listens on this machine's own address. The
+    // direct connection succeeds, so no test step waits on a refusal.
+    let Some(ip) = own_address() else {
+        eprintln!("skipped: this machine has no non-loopback IPv4 address");
+        return;
+    };
+    let (upstream, seen) = fake_upstream_on(ip).await;
     let (proxy, through) = fake_proxy(ProxyMode::Forward(upstream)).await;
-    // `[::ffff:127.0.0.1]` is not a loopback address to the relay (as an
-    // IPv6 address only `::1` is), so only NO_PROXY keeps it off the proxy
-    // (which would reach the fake gateway). Dialed directly it fails at
-    // once and locally on every OS: a port that is bound but not listening
-    // refuses on a dual-stack host (Linux, macOS), and a v6-only socket
-    // cannot connect to a mapped v4 address at all (Windows). `0.0.0.0`
-    // was tried first and hangs until the timeout on macOS arm64.
-    let closed = TcpSocket::new_v4().unwrap();
-    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let origin = format!(
-        "http://[::ffff:127.0.0.1]:{}",
-        closed.local_addr().unwrap().port()
-    );
-    let proxy = via(format!("http://{proxy}"), "localhost, ::ffff:0:0/96");
-    let relay = start_relay_with(&origin, proxy).await;
+    let proxy = via(format!("http://{proxy}"), &format!("localhost, {ip}"));
+    let relay = start_relay_with(&format!("http://{upstream}"), proxy).await;
     assert_eq!(health_of(&relay).await["proxy"], Value::Null);
 
-    let direct = "(no proxy: ";
-    let Err(tungstenite::Error::Http(refusal)) = connect(relay.addr, "test-token").await else {
-        panic!("an unreachable upstream must not upgrade");
-    };
-    assert_eq!(refusal.status(), 502);
-    let (kind, message) = error_of(refusal.body().as_deref().unwrap());
-    assert_eq!(kind, "upstream_unreachable");
-    assert!(message.contains(direct), "{message}");
-
+    let (mut ws, _) = connect(relay.addr, "test-token").await.unwrap();
+    stream_of(&turn(&mut ws).await);
+    close(ws).await;
     let reply = post_responses(&relay).await;
-    assert_eq!(reply.status(), 502);
-    let (_, message) = error_of(&reply.bytes().await.unwrap());
-    assert!(message.contains(direct), "{message}");
+    assert_eq!(reply.status(), 200);
+    timeout(STEP, reply.bytes()).await.unwrap().unwrap();
 
+    {
+        let seen = seen.lock().unwrap();
+        let authority = upstream.to_string();
+        assert_eq!(seen.handshake.as_ref().unwrap()["host"], authority.as_str());
+        assert_eq!(seen.http.len(), 1);
+    }
     assert!(through.lock().unwrap().untouched());
     timeout(STEP, relay.shutdown()).await.unwrap().unwrap();
 }

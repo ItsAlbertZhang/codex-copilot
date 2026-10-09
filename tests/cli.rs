@@ -948,6 +948,12 @@ fn override_needs_an_install() {
 
 /// A process whose image is named `codex` blocks the swap and a purge. It is
 /// a copy of node idling, so nothing Codex-like runs.
+///
+/// Node 24 names its main thread `MainThread` at startup, and on Linux the
+/// main thread's name is the process's `comm`, which is what `ps` lists. So
+/// on Linux the fake sets its title back to its image name (libuv's
+/// `prctl(PR_SET_NAME)`) before it reports in. A real Codex is a Rust binary
+/// that never renames its main thread.
 #[test]
 fn override_and_purge_refuse_while_codex_runs() {
     let stub = Stub::start(&[]);
@@ -965,7 +971,12 @@ fn override_and_purge_refuse_while_codex_runs() {
     fs::create_dir_all(fake.parent().unwrap()).unwrap();
     fs::copy(&node, &fake).unwrap();
     let mut child = Command::new(&fake)
-        .args(["-e", "console.log('up'); setTimeout(() => {}, 60000)"])
+        .args([
+            "-e",
+            "if (process.platform === 'linux') \
+               process.title = require('path').basename(process.execPath); \
+             console.log('up'); setTimeout(() => {}, 60000)",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
