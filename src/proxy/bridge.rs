@@ -9,6 +9,9 @@
 //! The upstream handshake is an HTTP/1.1 upgrade sent with the relay's one
 //! reqwest client, so it goes through the same proxy as the HTTP transports
 //! (see [`dial`]).
+//!
+//! Copilot's `error` frames carry no HTTP status, which Codex needs to act on
+//! them; [`complete_error`] adds one.
 
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -51,6 +54,20 @@ pub(super) const MAX_MESSAGE: usize = 256 << 20;
 const INTERNAL_ERROR: u16 = 1011;
 /// Close code for "going away": the client vanished or the relay stops.
 const GOING_AWAY: u16 = 1001;
+
+/// Codex's error code for "resend the whole request without
+/// `previous_response_id`" (`codex-api/src/endpoint/responses_websocket.rs`).
+const PREVIOUS_RESPONSE_NOT_FOUND: &str = "previous_response_not_found";
+
+/// Error codes Codex acts on before it looks for a status, so frames with
+/// them are left as they are.
+const CODEX_ERROR_CODES: [&str; 2] = [
+    "websocket_connection_limit_reached",
+    PREVIOUS_RESPONSE_NOT_FOUND,
+];
+
+/// How much of an upstream error message the log line keeps.
+const LOGGED_MESSAGE: usize = 300;
 
 /// The upstream WebSocket runs on the connection reqwest upgraded, directly
 /// or through a proxy.
@@ -372,7 +389,8 @@ where
 }
 
 /// Upstream to client: every JSON text frame goes through
-/// [`Normalizer::downstream`], everything else verbatim.
+/// [`Normalizer::downstream`] and `error` frames through [`complete_error`],
+/// everything else verbatim.
 async fn upstream_to_client<R, W>(
     rx: &mut R,
     tx: &mut W,
@@ -442,7 +460,30 @@ fn prepare_downstream(text: &str, norm: &Mutex<Normalizer>, conn: &str) -> Strin
         debug!(conn, bytes = text.len(), "upstream text frame (not JSON)");
         return text.to_string();
     };
-    let changed = lock(norm).downstream(&mut event);
+    let mut changed = lock(norm).downstream(&mut event);
+    if frame_type(&event) == "error" {
+        let completed = complete_error(&mut event);
+        changed |= completed;
+        let error = &event["error"];
+        let detail: String = error["message"]
+            .as_str()
+            .unwrap_or_default()
+            .chars()
+            .take(LOGGED_MESSAGE)
+            .collect();
+        let status = event
+            .get("status")
+            .or_else(|| event.get("status_code"))
+            .and_then(Value::as_u64);
+        info!(
+            conn,
+            code = error["code"].as_str().unwrap_or("?"),
+            status,
+            completed,
+            detail,
+            "upstream error frame"
+        );
+    }
     debug!(
         conn,
         kind = frame_type(&event),
@@ -454,6 +495,84 @@ fn prepare_downstream(text: &str, norm: &Mutex<Normalizer>, conn: &str) -> Strin
         event.to_string()
     } else {
         text.to_string()
+    }
+}
+
+/// Gives an upstream `error` frame without a status what Codex needs to act
+/// on it. Returns whether the frame changed.
+///
+/// Copilot refuses a `response.create` with
+/// `{"type":"error","error":{"code","message"},"headers":{...}}`, where
+/// OpenAI also sends the HTTP status. Codex turns such a frame into an error
+/// by one of two codes or by its status (`map_wrapped_websocket_error_event`,
+/// `codex-api/src/endpoint/responses_websocket.rs`) and skips anything else:
+/// it then waits out its 300 s stream idle timeout and retries, up to six
+/// times, before the HTTP fallback finally reports the error. So:
+///
+/// * Copilot's "Previous response with id '...' not found." (code
+///   `invalid_request_body`) gets Codex's code for it,
+///   `previous_response_not_found`, on which Codex resends the full request;
+/// * any other frame gets the status Copilot answers the same request with
+///   over HTTP: 400 for a request it refuses (Codex gives up and shows the
+///   message), 429 for a rate limit, and 500, which Codex retries, for
+///   anything else.
+///
+/// A frame that already has a status, or a code Codex acts on, is left alone.
+fn complete_error(event: &mut Value) -> bool {
+    let Some(obj) = event.as_object_mut() else {
+        return false;
+    };
+    if obj.get("type").and_then(Value::as_str) != Some("error")
+        || obj.contains_key("status")
+        || obj.contains_key("status_code")
+    {
+        return false;
+    }
+    let field = |name: &str| {
+        obj.get("error")
+            .and_then(|error| error.get(name))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let (code, message) = (field("code"), field("message"));
+    if CODEX_ERROR_CODES.contains(&code.as_str()) {
+        return false;
+    }
+    if is_missing_previous_response(&message) {
+        if let Some(error) = obj.get_mut("error").and_then(Value::as_object_mut) {
+            error.insert(
+                "code".to_string(),
+                Value::String(PREVIOUS_RESPONSE_NOT_FOUND.to_string()),
+            );
+            return true;
+        }
+    }
+    obj.insert("status".to_string(), Value::from(error_status(&code)));
+    true
+}
+
+/// Whether `message` is Copilot's (and OpenAI's) wording for an unknown
+/// `previous_response_id`.
+fn is_missing_previous_response(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.starts_with("previous response") && message.contains("not found")
+}
+
+/// The HTTP status of an error frame, from its code. Copilot's codes for a
+/// refused request are `invalid_request_body` and `model_not_supported` (400
+/// over HTTP); the `invalid_` and `unsupported_` families and an exceeded
+/// context are refusals as well.
+fn error_status(code: &str) -> u16 {
+    if code.contains("rate_limit") || code == "too_many_requests" {
+        429
+    } else if code.starts_with("invalid_")
+        || code.starts_with("unsupported_")
+        || matches!(code, "model_not_supported" | "context_length_exceeded")
+    {
+        400
+    } else {
+        500
     }
 }
 
@@ -613,6 +732,77 @@ mod tests {
         };
         assert_eq!(u16::from(frame.code), 4000);
         assert_eq!(frame.reason.as_str(), "bye");
+    }
+
+    /// A Copilot `error` frame, shaped like the WebSocket captures: no status,
+    /// the request ids in a top-level `headers` object.
+    fn copilot_error(code: &str, message: &str) -> Value {
+        json!({"type":"error","error":{"code":code,"message":message},
+               "headers":{"X-Copilot-Service-Request-Id":"560e3575",
+                          "X-Copilot-WebSocket-Session-Id":"6591fe57"}})
+    }
+
+    #[test]
+    fn copilot_error_frames_get_the_status_codex_needs() {
+        for (code, status) in [
+            ("invalid_request_body", 400),
+            ("model_not_supported", 400),
+            ("invalid_request_error", 400),
+            ("unsupported_value", 400),
+            ("context_length_exceeded", 400),
+            ("rate_limit_exceeded", 429),
+            ("user_weekly_rate_limited", 429),
+            ("too_many_requests", 429),
+            ("server_error", 500),
+            ("", 500),
+        ] {
+            let mut e = copilot_error(code, "Unknown parameter: 'input[1].x'.");
+            assert!(complete_error(&mut e), "{code}");
+            assert_eq!(e["status"], status, "{code}");
+            assert_eq!(e["error"]["code"], code, "the code is kept");
+            assert_eq!(e["headers"]["X-Copilot-Service-Request-Id"], "560e3575");
+        }
+        let mut bare = json!({"type":"error"});
+        assert!(complete_error(&mut bare));
+        assert_eq!(bare["status"], 500);
+    }
+
+    #[test]
+    fn a_missing_previous_response_gets_codexs_code_for_it() {
+        let message = "Previous response with id 'resp_bogus123' not found.";
+        let mut e = copilot_error("invalid_request_body", message);
+        assert!(complete_error(&mut e));
+        assert_eq!(e["error"]["code"], PREVIOUS_RESPONSE_NOT_FOUND);
+        assert_eq!(e["error"]["message"], message);
+        assert!(e.get("status").is_none(), "Codex acts on the code alone");
+    }
+
+    #[test]
+    fn error_frames_codex_can_act_on_are_left_alone() {
+        for original in [
+            json!({"type":"error","status":429,"error":{"code":"rate_limit_exceeded"}}),
+            json!({"type":"error","status_code":400,"error":{"code":"invalid_request_body"}}),
+            json!({"type":"error","error":{"code":"websocket_connection_limit_reached"}}),
+            json!({"type":"error","error":{"code":"previous_response_not_found"}}),
+            json!({"type":"response.failed","response":{"error":{"code":"server_error"}}}),
+            json!(["error"]),
+        ] {
+            let mut e = original.clone();
+            assert!(!complete_error(&mut e), "{original}");
+            assert_eq!(e, original);
+        }
+    }
+
+    #[test]
+    fn error_frames_reach_the_client_with_a_status() {
+        let norm = Mutex::new(Normalizer::with_stream("s"));
+        let text = copilot_error("invalid_request_body", "Unknown parameter").to_string();
+        let out: Value = serde_json::from_str(&prepare_downstream(&text, &norm, "t")).unwrap();
+        assert_eq!(out["status"], 400);
+        assert_eq!(out["error"]["message"], "Unknown parameter");
+        // One Codex can act on already goes out byte for byte.
+        let as_is = r#"{ "type": "error", "status": 429 }"#;
+        assert_eq!(prepare_downstream(as_is, &norm, "t"), as_is);
     }
 
     #[tokio::test]

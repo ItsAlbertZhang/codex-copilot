@@ -14,6 +14,15 @@
 //! anyway. `response.id`, `call_id` and everything else are left alone:
 //! `previous_response_id` must stay Copilot's real completed id.
 //!
+//! On the way up, every `input[]` item also loses
+//! `internal_chat_message_metadata_passthrough`. Copilot validates that object
+//! against a fixed list of keys and refuses the whole request when Codex adds
+//! one it does not know (`content_item_metadata`, sent by Codex 0.164.0 to
+//! responses-lite models, has been refused since 2026-10-24 with
+//! `invalid_request_body`). Codex already drops the object for every provider
+//! it does not consider OpenAI (`core/src/client.rs`, `build_responses_request`),
+//! so a request without it is one Codex itself sends.
+//!
 //! The namespace rotates on every `response.create`, so ids are only right
 //! while one request at a time is in flight on a connection. Codex keeps it
 //! that way: it holds the socket's stream lock from sending
@@ -25,6 +34,10 @@
 use serde_json::Value;
 
 use crate::{CODEX_AUTO_REVIEW, ITEM_ID_PREFIX};
+
+/// Per-item metadata Codex attaches for OpenAI's own backends; see the module
+/// docs for why it never goes to Copilot.
+const PASSTHROUGH: &str = "internal_chat_message_metadata_passthrough";
 
 /// Per-connection state: one id namespace per `response.create` request,
 /// which assumes the requests on one connection never overlap (see the
@@ -116,10 +129,11 @@ impl Normalizer {
 
     /// Prepares one client frame for Copilot. Only `response.create` frames
     /// are touched: they open a new id namespace, `codex-auto-review` becomes
-    /// `review_model` (CAPI does not serve it), and relay ids in `input[]` are
-    /// removed (the key itself, not set to null, which is exactly what Codex
-    /// sends for ids it strips). Returns whether the frame must be
-    /// re-serialized; otherwise the original text is forwarded byte for byte.
+    /// `review_model` (CAPI does not serve it), and relay ids and
+    /// `internal_chat_message_metadata_passthrough` in `input[]` are removed
+    /// (the key itself, not set to null, which is exactly what Codex sends
+    /// for what it strips). Returns whether the frame must be re-serialized;
+    /// otherwise the original text is forwarded byte for byte.
     pub fn upstream(&mut self, request: &mut Value, review_model: Option<&str>) -> bool {
         if request.get("type").and_then(Value::as_str) != Some("response.create") {
             return false;
@@ -130,8 +144,8 @@ impl Normalizer {
     /// Prepares the JSON body of an HTTP `POST /responses` for Copilot. That
     /// body is a `response.create` frame without its `type`, so it gets the
     /// same treatment as [`Normalizer::upstream`], unconditionally: a new id
-    /// namespace, the reviewer rewrite and relay id removal. Returns whether
-    /// the body must be re-serialized.
+    /// namespace, the reviewer rewrite, and relay id and passthrough removal.
+    /// Returns whether the body must be re-serialized.
     pub fn upstream_http(&mut self, request: &mut Value, review_model: Option<&str>) -> bool {
         self.new_request();
         let Some(obj) = request.as_object_mut() else {
@@ -151,13 +165,16 @@ impl Normalizer {
 
         if let Some(input) = obj.get_mut("input").and_then(Value::as_array_mut) {
             for item in input.iter_mut().filter_map(Value::as_object_mut) {
+                // shift_remove keeps the other keys in their original order.
                 if item
                     .get("id")
                     .and_then(Value::as_str)
                     .is_some_and(is_relay_id)
                 {
-                    // shift_remove keeps the other keys in their original order.
                     item.shift_remove("id");
+                    changed = true;
+                }
+                if item.shift_remove(PASSTHROUGH).is_some() {
                     changed = true;
                 }
             }
@@ -465,6 +482,46 @@ mod tests {
         assert_ne!(n.stream(), Some(first.as_str()));
         let mut not_an_object = json!([1]);
         assert!(!n.upstream_http(&mut not_an_object, None));
+    }
+
+    #[test]
+    fn upstream_drops_the_metadata_passthrough_from_every_item() {
+        // The shape Codex 0.164.0 sends a responses-lite model: Copilot
+        // refuses the request over `content_item_metadata`.
+        let passthrough = json!({"turn_id":"01a1716e-acf5","create_time":1792904455.29,
+            "content_item_kinds":["user.text"],
+            "content_item_metadata":[{"provenance":{"type":"user"}}]});
+        let mut req = json!({"type":"response.create","model":"gpt-6-astra","input":[
+            {"type":"additional_tools","id":"at_01a1","role":"developer","tools":[]},
+            {"type":"message","id":"msg_01a1","role":"user",
+             "content":[{"type":"input_text","text":"ping"}],
+             "internal_chat_message_metadata_passthrough":passthrough},
+            {"type":"custom_tool_call_output","call_id":"call_1","output":"ok",
+             "internal_chat_message_metadata_passthrough":{"turn_id":"t","cell_id":"c",
+                 "tool_calls_complete":true}},
+            {"type":"reasoning","summary":[],"encrypted_content":"gAAAA+blob"}
+        ]});
+        let mut n = Normalizer::new();
+        assert!(n.upstream(&mut req, None));
+        let input = req["input"].as_array().unwrap();
+        for item in input {
+            assert!(item.get(PASSTHROUGH).is_none(), "{item}");
+        }
+        let keys: Vec<_> = input[1].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["type", "id", "role", "content"]);
+        assert_eq!(input[1]["content"][0]["text"], "ping");
+        assert_eq!(input[2]["call_id"], "call_1");
+        assert_eq!(input[3]["encrypted_content"], "gAAAA+blob");
+
+        // The HTTP body gets the same treatment.
+        let mut body = json!({"model":"gpt-6-astra","input":[
+            {"type":"message","role":"user","content":[],
+             "internal_chat_message_metadata_passthrough":{"turn_id":"t"}}]});
+        assert!(n.upstream_http(&mut body, None));
+        assert_eq!(
+            body["input"][0],
+            json!({"type":"message","role":"user","content":[]})
+        );
     }
 
     #[test]

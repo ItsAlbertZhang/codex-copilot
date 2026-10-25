@@ -243,6 +243,16 @@ async fn fake_session(mut socket: WebSocket, seen: Record) {
                 if frame["type"] != "response.create" {
                     continue;
                 }
+                if frame["model"] == "test-refused" {
+                    // Copilot's refusal: an error frame without a status.
+                    let refusal = copilot_refusal(&frame);
+                    seen.lock().unwrap().creates.push(frame);
+                    let text = FakeMessage::Text(refusal.to_string().into());
+                    if socket.send(text).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
                 let (events, ids) = scripted_response();
                 {
                     let mut seen = seen.lock().unwrap();
@@ -263,6 +273,20 @@ async fn fake_session(mut socket: WebSocket, seen: Record) {
             _ => {}
         }
     }
+}
+
+/// The `error` frame Copilot answers a refused `response.create` with:
+/// no status, request ids in a top-level `headers` object. A frame naming a
+/// `previous_response_id` gets Copilot's "not found" for it.
+fn copilot_refusal(frame: &Value) -> Value {
+    let message = match frame["previous_response_id"].as_str() {
+        Some(id) => format!("Previous response with id '{id}' not found."),
+        None => "[ObjectParam] [input[1].x] [unknown_parameter] Unknown parameter: 'input[1].x'."
+            .to_string(),
+    };
+    json!({"type":"error","error":{"code":"invalid_request_body","message":message},
+           "headers":{"X-Copilot-Service-Request-Id":"fake-service-request",
+                      "X-Copilot-WebSocket-Session-Id":"fake-ws-session"}})
 }
 
 async fn fake_search(State(seen): State<Record>, headers: HeaderMap, body: String) -> Json<Value> {
@@ -408,14 +432,30 @@ async fn close(mut ws: Client) {
         .expect("close handshake timed out");
 }
 
+/// The per-item metadata Codex 0.164.0 sends, which Copilot refuses.
+const PASSTHROUGH: &str = "internal_chat_message_metadata_passthrough";
+
 fn create_frame() -> Value {
     json!({"type":"response.create","model":"codex-auto-review","stream":true,
     "input":[
         {"type":"message","id":"copilot-x-0","role":"assistant",
          "content":[{"type":"output_text","text":"earlier"}]},
         {"type":"message","id":"msg_keep","role":"user",
-         "content":[{"type":"input_text","text":"hi"}]}
+         "content":[{"type":"input_text","text":"hi"}],
+         PASSTHROUGH:{"turn_id":"t1","content_item_kinds":["user.text"],
+                      "content_item_metadata":[{"provenance":{"type":"user"}}]}}
     ]})
+}
+
+/// Checks that one `input[]` reached the upstream as Copilot accepts it.
+fn assert_input_upstream(input: &Value) {
+    assert!(input[0].get("id").is_none(), "relay id reached upstream");
+    assert_eq!(input[0]["content"][0]["text"], "earlier");
+    assert_eq!(input[1]["id"], "msg_keep");
+    assert_eq!(input[1]["content"][0]["text"], "hi");
+    for item in input.as_array().unwrap() {
+        assert!(item.get(PASSTHROUGH).is_none(), "{item}");
+    }
 }
 
 /// Sends one `response.create` and collects events up to `response.completed`.
@@ -534,12 +574,7 @@ async fn the_bridge_normalizes_ids_and_forwards_identity() {
         let seen = seen.lock().unwrap();
         let sent = &seen.creates[0];
         assert_eq!(sent["model"], REVIEW_MODEL);
-        assert!(
-            sent["input"][0].get("id").is_none(),
-            "relay id reached upstream"
-        );
-        assert_eq!(sent["input"][0]["content"][0]["text"], "earlier");
-        assert_eq!(sent["input"][1]["id"], "msg_keep");
+        assert_input_upstream(&sent["input"]);
         assert_eq!(response_ids(&first), seen.response_ids[0]);
     }
     let stream1 = stream_of(&first);
@@ -819,12 +854,7 @@ async fn the_http_fallback_normalizes_the_event_stream() {
         assert_eq!(sent.query.as_deref(), Some("api-version=2026-08-01"));
         assert_eq!(sent.body["model"], REVIEW_MODEL);
         assert!(sent.body.get("type").is_none());
-        assert!(
-            sent.body["input"][0].get("id").is_none(),
-            "relay id reached upstream"
-        );
-        assert_eq!(sent.body["input"][0]["content"][0]["text"], "earlier");
-        assert_eq!(sent.body["input"][1]["id"], "msg_keep");
+        assert_input_upstream(&sent.body["input"]);
         assert_eq!(sent.headers["authorization"], format!("Bearer {bearer}"));
         assert_eq!(sent.headers["x-test-custom"], "kept");
         let integration: Vec<_> = sent
@@ -857,6 +887,55 @@ async fn the_http_fallback_normalizes_the_event_stream() {
     let body: Value = reply.json().await.unwrap();
     assert_eq!(body, json!({"error": {"message": "Bad credentials"}}));
 
+    timeout(STEP, relay.shutdown()).await.unwrap().unwrap();
+}
+
+/// Sends `frame` and returns the next text frame from the relay as JSON.
+async fn reply_to(ws: &mut Client, frame: &Value) -> Value {
+    ws.send(Message::text(frame.to_string())).await.unwrap();
+    let next = timeout(STEP, ws.next()).await.expect("no reply");
+    let Some(Ok(Message::Text(text))) = next else {
+        panic!("unexpected frame: {next:?}");
+    };
+    serde_json::from_str(text.as_str()).unwrap()
+}
+
+#[tokio::test]
+async fn copilot_error_frames_reach_the_client_with_what_codex_acts_on() {
+    let (upstream, seen) = fake_upstream().await;
+    let relay = start_relay(upstream).await;
+    let (mut ws, _) = connect(relay.addr, "test-token").await.unwrap();
+
+    // A refused request gets the status Copilot would answer it with over
+    // HTTP, so Codex reports it at once instead of waiting for a timeout.
+    let mut refused = create_frame();
+    refused["model"] = json!("test-refused");
+    let error = reply_to(&mut ws, &refused).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["status"], 400);
+    assert_eq!(error["error"]["code"], "invalid_request_body");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("Unknown parameter"));
+    assert_eq!(
+        error["headers"]["X-Copilot-Service-Request-Id"],
+        "fake-service-request"
+    );
+    assert_input_upstream(&seen.lock().unwrap().creates[0]["input"]);
+
+    // An unknown previous response gets Codex's own code, on which it
+    // resends the whole request.
+    refused["previous_response_id"] = json!("resp_gone");
+    let error = reply_to(&mut ws, &refused).await;
+    assert_eq!(error["error"]["code"], "previous_response_not_found");
+    assert!(error.get("status").is_none(), "{error}");
+
+    // The socket stays usable, as it does with Copilot.
+    let events = turn(&mut ws).await;
+    stream_of(&events);
+
+    close(ws).await;
     timeout(STEP, relay.shutdown()).await.unwrap().unwrap();
 }
 
