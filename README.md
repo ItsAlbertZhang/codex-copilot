@@ -6,12 +6,13 @@ Codex a dedicated home, `~/.codex-copilot`, that is configured to go through it.
 
 Codex connects to `ws://127.0.0.1:12899/responses`. The relay opens the real
 `wss://api.*.githubcopilot.com/responses`, adds the Copilot identity headers,
-and passes every frame through in order. On the way back it changes one thing:
-item ids, which Copilot changes on every streamed event and Codex expects to
-stay put. Remote compaction v2, `previous_response_id` and incremental input
-work as they do against OpenAI. When Codex falls back to HTTP SSE
-(`POST /responses`), the relay serves that transport too, with the same
-rewrite.
+and passes every frame through in order. On the way back it changes item ids,
+which Copilot changes on every streamed event and Codex expects to stay put,
+and completes Copilot's error frames so that Codex can act on them. On the way
+up it drops per-item metadata Copilot refuses. Remote compaction v2,
+`previous_response_id` and incremental input work as they do against OpenAI.
+When Codex falls back to HTTP SSE (`POST /responses`), the relay serves that
+transport too, with the same rewrites.
 
 There is one executable, `codex-copilot`, with two halves. The stateless half
 (`install`, `override`, `unoverride`, `login`, `status`, `uninstall`) only
@@ -100,8 +101,10 @@ end-to-end headers. Its body is read to the end, up to 256 MiB; one that was
 cut short is passed on as far as it arrived (a chunked body as far as it
 decodes, which may be nothing), and never with its chunk framing.
 
-**Downstream** (CAPI to Codex): item ids are rewritten as described below.
-Everything else in each frame is left as it was, key order included.
+**Downstream** (CAPI to Codex): item ids are rewritten as described below, and
+on the WebSocket an `error` frame without a status gets one (see
+[Error frames](#error-frames)). Everything else in each frame is left as it
+was, key order included.
 
 **Upstream** (Codex to CAPI; each `response.create` frame, and the body of a
 `POST /responses`):
@@ -110,6 +113,15 @@ Everything else in each frame is left as it was, key order included.
   [Approval review](#approval-review---no-yolo)).
 - Any relay-made `copilot-...` id still present in `input[]` is dropped.
   Codex already strips them; this is a second line of defence.
+- `internal_chat_message_metadata_passthrough` is dropped from every `input[]`
+  item. Copilot checks that object against a fixed list of keys and refuses
+  the whole request (`400 invalid_request_body`, "Unknown parameter") when
+  Codex adds one it does not know: Codex 0.164 sends `content_item_metadata`
+  (where each part of a message came from) to responses-lite models, and
+  Copilot has refused it since 2026-10-24. The object is metadata for OpenAI's
+  own backends, and Codex drops it itself for every provider it does not
+  consider OpenAI; Codex keeps its own copy, so compaction and history are
+  unaffected.
 - Everything else goes out as Codex sent it.
 
 **Plain HTTP** on the same port:
@@ -149,6 +161,33 @@ The relay never answers `426 Upgrade Required` on the WebSocket route, and
 turns an upstream `426` into a `502`. At the handshake a `426` makes Codex drop
 WebSockets for the whole session at once, where any other failure only does so
 after the retry budget is spent.
+
+### Error frames
+
+When Copilot refuses a `response.create` on the WebSocket it sends one frame,
+`{"type":"error","error":{"code":...,"message":...},"headers":{...}}`, with no
+HTTP status. Codex acts on an `error` frame only by its status or by one of two
+codes (`map_wrapped_websocket_error_event` in
+`codex-api/src/endpoint/responses_websocket.rs`) and skips any other. Left
+alone, a refused turn would wait out Codex's 300 s stream idle timeout on every
+retry and only fail, half an hour later, once the HTTP fallback got the real
+`400`; and the `generate=false` prewarm Codex sends when it opens a socket,
+which Copilot refuses, would hold up the first request by about 15 s.
+
+So an `error` frame without `status` gets one, from its code:
+
+| `error.code` | `status` | Codex then |
+| --- | --- | --- |
+| `invalid_...`, `unsupported_...`, `model_not_supported`, `context_length_exceeded` | `400` | stops and shows the message |
+| containing `rate_limit`, or `too_many_requests` | `429` | treats it as a rate limit |
+| anything else | `500` | retries |
+
+Copilot reports an unknown `previous_response_id` as `invalid_request_body`
+with the message "Previous response with id '...' not found.". That frame gets
+Codex's own code for it, `previous_response_not_found`, instead of a status,
+and Codex resends the whole request. Frames that already have a status, or
+carry one of the two codes Codex knows, pass unchanged. Every `error` frame is
+logged at `info` level with its code, status and message.
 
 ### Limits and shutdown
 
@@ -268,8 +307,8 @@ non-empty) and drops every other id from the request copy
 ([core/src/client.rs](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs),
 `ResponseItemId::is_prefixed`). Copilot's own base64 ids already fail that
 test, so under 1.x Codex never sent them back either. The relay's ids fail it
-by design: they never reach Copilot, and upstream requests look exactly as they
-did under 1.x.
+by design: they never reach Copilot, and the item ids in upstream requests are
+exactly what they were under 1.x.
 
 `response.id` and `call_id` are passed through unchanged.
 
