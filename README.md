@@ -341,14 +341,14 @@ Download the executable and its `.sha256` file from
 [GitHub Releases](https://github.com/ItsAlbertZhang/codex-copilot/releases):
 `codex-copilot-<version>-windows-<arch>.exe`. Choose `x64` for Intel/AMD PCs or
 `arm64` for Windows on ARM. Verify the download with
-`Get-FileHash .\codex-copilot-2.0.0-windows-x64.exe -Algorithm SHA256` and
+`Get-FileHash .\codex-copilot-2.0.1-windows-x64.exe -Algorithm SHA256` and
 compare the hash with the one in its `.sha256` file.
 
 Put it in a permanent folder, then rename it, unblock it and run from
 PowerShell:
 
 ```powershell
-Rename-Item .\codex-copilot-2.0.0-windows-x64.exe codex-copilot.exe
+Rename-Item .\codex-copilot-2.0.1-windows-x64.exe codex-copilot.exe
 Unblock-File .\codex-copilot.exe
 .\codex-copilot.exe --help
 .\codex-copilot.exe login
@@ -372,8 +372,8 @@ Download the binary and its `.sha256` file from the same releases page.
 Choose `macos-arm64` for Apple silicon or `macos-x64` for Intel Macs, then:
 
 ```console
-$ shasum -a 256 -c codex-copilot-2.0.0-macos-arm64.sha256
-$ mv codex-copilot-2.0.0-macos-arm64 codex-copilot
+$ shasum -a 256 -c codex-copilot-2.0.1-macos-arm64.sha256
+$ mv codex-copilot-2.0.1-macos-arm64 codex-copilot
 $ chmod +x codex-copilot
 $ xattr -d com.apple.quarantine codex-copilot
 $ ./codex-copilot --help
@@ -436,7 +436,7 @@ The binary is single-architecture; there is no universal build.
 
 The **portable-release** GitHub Actions workflow builds both Windows and both
 macOS targets. Run it manually to download the binaries from the workflow's
-artifacts, or push a tag matching the Cargo version (for example `v2.0.0`) to
+artifacts, or push a tag matching the Cargo version (for example `v2.0.1`) to
 create a draft GitHub Release with every binary and checksum. Review and publish
 the draft to make the downloads public.
 
@@ -559,7 +559,7 @@ if you want one).
 A fresh install writes exactly this (defaults shown):
 
 ```toml
-# codex-copilot 2.0.0 - managed keys for running Codex against GitHub
+# codex-copilot 2.0.1 - managed keys for running Codex against GitHub
 # Copilot CAPI through the local relay. `codex-copilot install` rewrites the
 # managed keys and leaves everything else in this file alone (Codex writes
 # project trust, hook state and model choices back into it).
