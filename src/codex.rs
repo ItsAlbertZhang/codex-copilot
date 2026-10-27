@@ -9,7 +9,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Launcher {
@@ -49,6 +49,44 @@ fn on_path(name: &str) -> Option<PathBuf> {
         .find(|c| is_runnable(c))
 }
 
+/// How to install Codex, for messages.
+#[cfg(windows)]
+const INSTALL: &str =
+    "`irm https://chatgpt.com/codex/install.ps1 | iex`, or `npm install -g @openai/codex`";
+#[cfg(not(windows))]
+const INSTALL: &str =
+    "`curl -fsSL https://chatgpt.com/codex/install.sh | sh`, or `npm install -g @openai/codex`";
+
+/// Where the standalone installer puts the `codex` command: under
+/// `$CODEX_INSTALL_DIR`, else `~/.local/bin` (`install.sh`) or
+/// `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` (`install.ps1`).
+fn standalone_commands() -> Vec<PathBuf> {
+    let name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    let mut dirs = Vec::new();
+    if let Some(dir) = std::env::var_os("CODEX_INSTALL_DIR").filter(|dir| !dir.is_empty()) {
+        dirs.push(PathBuf::from(dir));
+    }
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|dir| !dir.is_empty()) {
+            dirs.push(Path::new(&local).join(r"Programs\OpenAI\Codex\bin"));
+        }
+    } else if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local").join("bin"));
+    }
+    dirs.into_iter().map(|dir| dir.join(name)).collect()
+}
+
+/// `link` and its target, when `link` is a symlink (or junction) whose
+/// target is gone.
+fn dangling(link: &Path) -> Option<(PathBuf, PathBuf)> {
+    let is_link = std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink());
+    if !is_link || link.exists() {
+        return None;
+    }
+    let target = std::fs::read_link(link).ok()?;
+    Some((link.to_path_buf(), target))
+}
+
 fn powershell_exe() -> PathBuf {
     on_path("pwsh.exe")
         .or_else(|| on_path("powershell.exe"))
@@ -78,32 +116,53 @@ impl CodexBin {
         Ok(Self { path, launcher })
     }
 
-    /// Walks `PATH` for `codex`, trying a fixed extension order.
+    /// Walks `PATH` for `codex`, trying a fixed extension order, then the
+    /// standalone installer's own command location: the installer adds that
+    /// to PATH through the shell profile, so a shell started before it ran
+    /// does not have it yet.
     pub fn discover() -> Result<Self> {
-        let path_var = std::env::var_os("PATH")
-            .ok_or_else(|| anyhow!("PATH is not set; cannot find codex"))?;
-        for dir in std::env::split_paths(&path_var) {
-            if dir.as_os_str().is_empty() {
-                continue;
-            }
-            for ext in EXTS {
-                let candidate = if ext.is_empty() {
-                    dir.join("codex")
-                } else {
-                    dir.join(format!("codex.{ext}"))
-                };
-                if is_runnable(&candidate) {
-                    return Ok(Self {
-                        launcher: launcher_for(&candidate),
-                        path: candidate,
+        let mut candidates = Vec::new();
+        if let Some(path_var) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                if dir.as_os_str().is_empty() {
+                    continue;
+                }
+                for ext in EXTS {
+                    candidates.push(if ext.is_empty() {
+                        dir.join("codex")
+                    } else {
+                        dir.join(format!("codex.{ext}"))
                     });
                 }
             }
         }
-        bail!(
-            "`codex` was not found on PATH. Install the Codex CLI first \
-             (`npm install -g @openai/codex`) or pass --codex-bin <path>."
-        )
+        let standalone = standalone_commands();
+        candidates.extend(standalone.iter().cloned());
+        if let Some(path) = candidates.iter().find(|c| is_runnable(c)) {
+            return Ok(Self {
+                launcher: launcher_for(path),
+                path: path.clone(),
+            });
+        }
+        // install.ps1 links the command's directory rather than the command.
+        let broken = candidates
+            .iter()
+            .map(PathBuf::as_path)
+            .chain(standalone.iter().filter_map(|c| c.parent()))
+            .find_map(dangling);
+        if let Some((link, target)) = broken {
+            bail!(
+                "`codex` is installed but broken: {} links to {}, which does not exist. The \
+                 standalone Codex installer links the command into $CODEX_HOME/packages, so \
+                 moving that directory breaks it; `override` / `unoverride` of codex-copilot \
+                 2.0.0 and 2.0.1 did. If an override made by such a version is active, \
+                 `codex-copilot unoverride` puts it back. Otherwise reinstall Codex ({INSTALL}), \
+                 or pass --codex-bin <path>.",
+                link.display(),
+                target.display()
+            );
+        }
+        bail!("`codex` was not found on PATH. Install the Codex CLI first ({INSTALL}) or pass --codex-bin <path>.")
     }
 
     /// Runs `codex --version` and extracts the semver. `CODEX_HOME` is pinned
@@ -192,6 +251,28 @@ mod tests {
         assert_eq!(launcher_for(Path::new("codex.ps1")), Launcher::PowerShell);
         assert_eq!(launcher_for(Path::new("codex.exe")), Launcher::Direct);
         assert_eq!(launcher_for(Path::new("/usr/bin/codex")), Launcher::Direct);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_named_with_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("gone").join("bin").join("codex");
+        let link = dir.path().join("codex");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(!is_runnable(&link));
+        assert_eq!(dangling(&link), Some((link.clone(), target)));
+
+        // A link to a directory that is gone, like install.ps1's `bin`.
+        let bin = dir.path().join("bin");
+        std::os::unix::fs::symlink(dir.path().join("gone"), &bin).unwrap();
+        assert_eq!(dangling(&bin), Some((bin, dir.path().join("gone"))));
+
+        // A plain file, or nothing at all, is not a dangling link.
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "x").unwrap();
+        assert_eq!(dangling(&plain), None);
+        assert_eq!(dangling(&dir.path().join("missing")), None);
     }
 
     #[test]

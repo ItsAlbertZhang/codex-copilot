@@ -1205,6 +1205,9 @@ fn swap(ctx: &Ctx, force: bool, to_override: bool) -> Result<()> {
     for step in &report.steps {
         println!("{step}");
     }
+    for note in &report.notes {
+        println!("\n{note}.");
+    }
 
     let (codex, copilot) = (homes.codex(), homes.copilot());
     let width = codex
@@ -1215,17 +1218,24 @@ fn swap(ctx: &Ctx, force: bool, to_override: bool) -> Result<()> {
     let row = |path: &Path, what: &str| {
         println!("  {:<width$}  {what}", path.display().to_string());
     };
+    // What a swap leaves where there was no regular Codex home: nothing, or
+    // a directory kept for the Codex installation alone.
+    let regular = |path: &Path| {
+        if !path.exists() {
+            "(absent: there was no regular Codex home)"
+        } else if home::holds_only_packages(path) {
+            "(only Codex's own installation, if any: there was no regular Codex home)"
+        } else {
+            "your regular Codex home"
+        }
+    };
     println!("\nNow:");
     if to_override {
         row(
             &codex,
             "the codex-copilot home: plain `codex` and every Codex client run on Copilot",
         );
-        if copilot.exists() {
-            row(&copilot, "your regular Codex home");
-        } else {
-            row(&copilot, "(absent: there was no regular Codex home)");
-        }
+        row(&copilot, regular(&copilot));
         println!(
             "\nRestart running Codex clients (desktop app, editor integrations) so \
              they pick up the swapped home. They need {TOKEN_ENV} in their environment.\n\
@@ -1236,11 +1246,7 @@ fn swap(ctx: &Ctx, force: bool, to_override: bool) -> Result<()> {
              README section \"{LOGIN_RECIPES}\" has per-platform recipes."
         );
     } else {
-        if codex.exists() {
-            row(&codex, "your regular Codex home");
-        } else {
-            row(&codex, "(absent: there was no regular Codex home)");
-        }
+        row(&codex, regular(&codex));
         row(
             &copilot,
             "the codex-copilot home: run Codex on it with CODEX_HOME",
@@ -1404,20 +1410,58 @@ fn purge(home: &Path, located: Located) -> Result<()> {
         );
         return Ok(());
     }
-    fs::remove_dir_all(home).with_context(|| {
+    let in_use = || {
         format!(
             "could not delete {} (is a program using it?)",
             home.display()
         )
-    })?;
+    };
+    // Codex's own installation is not the home's to lose: the `codex`
+    // command may well run from it (see `home::PACKAGES_DIR`).
+    let packages = home.join(home::PACKAGES_DIR);
+    if fs::symlink_metadata(&packages).is_err() {
+        fs::remove_dir_all(home).with_context(in_use)?;
+        line(
+            "Deleted",
+            format_args!(
+                "{} (config, sessions and everything else in it)",
+                home.display()
+            ),
+        );
+        return Ok(());
+    }
+    for entry in fs::read_dir(home).with_context(in_use)? {
+        let entry = entry.with_context(in_use)?;
+        if entry.file_name() != home::PACKAGES_DIR {
+            remove_entry(&entry.path()).with_context(in_use)?;
+        }
+    }
     line(
         "Deleted",
         format_args!(
-            "{} (config, sessions and everything else in it)",
-            home.display()
+            "everything in {} (config, sessions, ...) but {}",
+            home.display(),
+            home::PACKAGES_DIR
         ),
     );
+    println!(
+        "\nKept {}: it is a Codex installation (the standalone installer puts its releases \
+         there, and the `codex` command may run from it), not part of the home. Delete it \
+         yourself once no `codex` links into it.",
+        packages.display()
+    );
     Ok(())
+}
+
+/// Removes a file, a link (without following it) or a whole directory.
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        // A Windows directory symlink or junction is removed as a directory.
+        fs::remove_file(path).or_else(|err| fs::remove_dir(path).map_err(|_| err))
+    }
 }
 
 /// Whether `home`'s config.toml carries the provider table `install` writes,

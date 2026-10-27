@@ -91,9 +91,9 @@ pub enum Command {
     /// Check the relay, the dedicated home, the token variable and codex.
     Status(StatusArgs),
     /// Make the dedicated home the default one: swap ~/.codex and
-    /// ~/.codex-copilot.
+    /// ~/.codex-copilot. Codex's own installation (packages/) stays put.
     Override(SwapArgs),
-    /// Swap ~/.codex and ~/.codex-copilot back.
+    /// Swap ~/.codex and ~/.codex-copilot back; packages/ stays put.
     Unoverride(SwapArgs),
     /// Start the relay in the background and wait until it answers.
     Start(StartArgs),
@@ -208,7 +208,8 @@ pub struct SwapArgs {
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct UninstallArgs {
-    /// Also delete the dedicated home (sessions, config, everything in it).
+    /// Also delete the dedicated home (sessions, config, everything in it but
+    /// a Codex installation in packages/).
     #[arg(long)]
     pub purge: bool,
 

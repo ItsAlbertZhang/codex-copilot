@@ -314,12 +314,20 @@ exactly what they were under 1.x.
 
 ## Prerequisites
 
-- `codex` on PATH (`npm install -g @openai/codex`), or `--codex-bin <path>`
-  (or `CODEX_BIN`). On Windows the npm entry point is a `codex.cmd` /
-  `codex.ps1` shim rather than an `.exe`; it is resolved and launched correctly
-  without help. `install` only warns when it cannot find Codex: the relay and
-  the config do not need it, but Codex has to be there before you run it on
-  the dedicated home. Developed against Codex 0.160.
+- The Codex CLI, from the official standalone installer
+  (`curl -fsSL https://chatgpt.com/codex/install.sh | sh` on macOS and Linux,
+  `irm https://chatgpt.com/codex/install.ps1 | iex` in PowerShell on Windows)
+  or from npm (`npm install -g @openai/codex`); or point at a binary with
+  `--codex-bin <path>` (or `CODEX_BIN`). Codex is looked up on PATH, then
+  where the standalone installer puts its command (`$CODEX_INSTALL_DIR`, else
+  `~/.local/bin/codex`, or `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`
+  on Windows), so a shell opened before the installer added that to PATH still
+  finds it. On Windows the npm entry point is a `codex.cmd` / `codex.ps1` shim
+  rather than an `.exe`; it is resolved and launched correctly without help.
+  `install` only warns when it cannot find Codex: the relay and the config do
+  not need it, but Codex has to be there before you run it on the dedicated
+  home. Developed against Codex 0.160; the standalone layout checked against
+  0.164.
 - A GitHub Copilot seat on which the target model is enabled: CAPI
   `GET /models` must list it with `ws:/responses` among its
   `supported_endpoints`. `codex-copilot status --probe` checks.
@@ -549,6 +557,9 @@ Codex does not prompt for approvals, and commands run without a sandbox. Pass
 
 The state file marks its directory as the dedicated home and travels with it
 through `override`; that is how the tool tells the two directories apart.
+`packages/` in either home is Codex's own installation, not something
+codex-copilot writes: it stays at its path through `override` (see
+[Override](#override)) and survives `uninstall --purge`.
 `install` never touches `~/.codex`, the credential store, or your environment
 variables, and registers nothing with the OS: no Run key, LaunchAgent or
 systemd unit (see [Starting the relay at login](#starting-the-relay-at-login)
@@ -753,6 +764,32 @@ names:
 It takes three renames through a temporary name, or one rename when `~/.codex`
 does not exist. `unoverride` swaps back. Nothing inside either directory is
 edited, so there is no backup to keep and nothing to merge.
+
+The exception is `packages/`, which is **not** swapped: it is Codex's own
+installation, not part of either identity. The standalone installers
+(`install.sh`, `install.ps1`) put the Codex releases in
+`$CODEX_HOME/packages/standalone/releases/<version>-<target>/` (and the app
+server daemon's in `packages/app-server-daemon/`), then link to them with
+absolute paths: `packages/standalone/current` points at the release, and the
+`codex` command (`~/.local/bin/codex`, or the
+`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` junction on Windows) points
+through `~/.codex/packages/standalone/current`. Codex's self-update reruns the
+installer against the current `CODEX_HOME`. Swapped along with its home, that
+tree would leave `codex` a dangling link (`codex: command not found`). So after
+the directory renames, each `packages/` is moved back to the path it was
+installed under: two of them trade places through a second temporary name
+(`.codex-packages.codex-copilot-swap`), and when a home's name is left free (no
+regular Codex home), an empty directory is created there to hold its
+`packages/`. The command prints these steps along with the renames, and a
+failure anywhere undoes all of them. `app-server-daemon/` (the daemon's pid
+records, not its packages) is runtime state and moves with its home.
+
+codex-copilot 2.0.0 and 2.0.1 swapped `packages/` with everything else. A tree
+left behind by such a swap is recognized by its `current` links, which lead
+into the other home's `packages/`: when every `packages/` there is such a
+leftover, the swap lets them travel with their homes, back to where their links
+lead. So `codex-copilot unoverride` with this version repairs a `codex` command
+an older `override` broke; see [Troubleshooting](#troubleshooting).
 
 ```console
 $ codex-copilot override
@@ -1128,6 +1165,16 @@ about 178k of window on `gpt-6-astra` on the seat this was developed on.
   home Codex is using (`CODEX_HOME`, `override` state in `status`) and that its
   `config.toml` has `base_url = "http://127.0.0.1:12899"` - a leftover 1.x
   configuration points straight at `api.*.githubcopilot.com`.
+- **`codex: command not found` (or `status` says `codex` links to something
+  that does not exist) after an `override` by codex-copilot 2.0.0 or 2.0.1**:
+  that version moved the standalone install's `packages/` with `~/.codex`
+  (see [Override](#override)). Run `codex-copilot unoverride` with this
+  version: it puts `packages/` back where its links lead, and a later
+  `override` leaves it there. If you already reinstalled Codex into the new
+  `~/.codex`, the swap keeps that working install in place; the stale copy in
+  the other home can be deleted. Reinstalling with the official installer
+  (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`) also fixes the
+  link.
 - **`override` refuses**: a Codex process is running; the message lists each
   one by image name and pid (see [Override](#override) for the names it
   looks for). Close the desktop app, editor integrations and terminals
@@ -1193,9 +1240,12 @@ state file is gone a plain `stop` only looks at the default
 `127.0.0.1:12899`. Remove any login-time entry you added
 yourself (see [Starting the relay at login](#starting-the-relay-at-login)).
 `~/.codex-copilot` and everything Codex keeps in it stay; its `config.toml` then points at a relay that may no longer
-run. `uninstall --purge` deletes `~/.codex-copilot` as well, sessions included;
-like `override`, it refuses while a codex process runs (`--force` skips the
-check). Both refuse while an override is active. The token variable is yours;
+run. `uninstall --purge` deletes `~/.codex-copilot` as well, sessions included,
+except a `packages/` directory: that is a Codex installation (Codex updating
+itself while running on the dedicated home installs there, and the `codex`
+command may run from it), so it is kept and named; delete it yourself once no
+`codex` links into it. Like `override`, `--purge` refuses while a codex process
+runs (`--force` skips the check). Both refuse while an override is active. The token variable is yours;
 clear it only when you no longer need it. To stop the relay for a while without
 uninstalling, use `codex-copilot stop`.
 
@@ -1230,9 +1280,9 @@ Stateless (files only; never starts or stops a process):
 | `install` | resolves the token, probes the gateway, writes `config.toml` and the state file in the dedicated home, detects the codex version. Does not start, stop or probe the relay, and registers no autostart. `--listen` takes an `IP:PORT`, never a host name |
 | `login` | device flow, prints the token and the set-variable one-liners; never stores it |
 | `status [--probe]` | a header with the `Relay log` path, then the relay first (running: version, URL, pid, upstream, proxy; else `codex-copilot start`), then state, config, token variable and codex version, each `ok` / `WARN` / `FAIL`; exits non-zero on a FAIL. `--probe` also prints the proxy the running relay uses, and checks CAPI `GET /models` and the configured models |
-| `override [--force]` | swaps `~/.codex` and `~/.codex-copilot` (refused while Codex runs; the refusal names the processes) and reminds you that every Codex entry point now needs the relay |
-| `unoverride [--force]` | swaps them back |
-| `uninstall [--purge [--force]]` | removes the state file; `--purge` deletes `~/.codex-copilot` (refused while codex runs, unless `--force`). Refused while overridden. Prints a hint to run `codex-copilot stop` when a relay still answers on the installed (else the default) address; does not stop it |
+| `override [--force]` | swaps `~/.codex` and `~/.codex-copilot`, leaving each `packages/` (the Codex installation) at its path (refused while Codex runs; the refusal names the processes) and reminds you that every Codex entry point now needs the relay |
+| `unoverride [--force]` | swaps them back, `packages/` again staying put |
+| `uninstall [--purge [--force]]` | removes the state file; `--purge` deletes `~/.codex-copilot` but a `packages/` in it (refused while codex runs, unless `--force`). Refused while overridden. Prints a hint to run `codex-copilot stop` when a relay still answers on the installed (else the default) address; does not stop it |
 
 Stateful (processes and the port only; defaults come from the state file):
 
@@ -1250,6 +1300,7 @@ before another subcommand.
 | --- | --- |
 | `COPILOT_GITHUB_TOKEN` | the bearer Codex sends; you set it. `install` and `status` read it (`status` only warns when its shell lacks it) |
 | `CODEX_BIN` | same as `--codex-bin` |
+| `CODEX_INSTALL_DIR` | where the standalone Codex installer put the `codex` command, if not the default; looked in when `codex` is not on PATH |
 | `CODEX_COPILOT_LOG` | log level of the relay, foreground or started by `start`: `error`, `warn`, `info` (default), `debug`, `trace` |
 | `CODEX_COPILOT_LOG_DIR` | directory for `relay.log` (and `status`'s `Relay log` line) instead of the per-user one; a test hook, inherited by a relay `start` spawns; the foreground relay logs to stderr and ignores it |
 | `CODEX_COPILOT_HOSTS` | same as the hidden `install --hosts`: a comma-separated gateway search list (testing) |
