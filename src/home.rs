@@ -5,6 +5,10 @@
 //! `override` swaps the two directory names, so "which directory holds the
 //! state file" is the only record of whether an override is active. There is
 //! deliberately no marker or transaction file that could disagree with it.
+//!
+//! The one thing the swap does not move with a home is `packages/`, Codex's
+//! own installation, which absolute links elsewhere point into: it stays at
+//! its path (see [`packages_steps`]).
 
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -20,6 +24,14 @@ use crate::STATE_FILE;
 /// A leftover one means an earlier swap died half-way, and only a human can
 /// tell which directory is which, so swaps refuse to run while it exists.
 pub const SWAP_TEMP_NAME: &str = ".codex.codex-copilot-swap";
+
+/// Where a Codex home keeps Codex's own installation (see [`packages_steps`]).
+pub const PACKAGES_DIR: &str = "packages";
+
+/// Name a `packages/` directory is parked under while a swap puts the two
+/// installations back in place. Refused when left over, like
+/// [`SWAP_TEMP_NAME`].
+pub const PACKAGES_SWAP_TEMP_NAME: &str = ".codex-packages.codex-copilot-swap";
 
 /// The two sibling directories under the user's home directory.
 #[derive(Debug, Clone)]
@@ -70,6 +82,10 @@ impl Homes {
     /// Where a swap parks a directory between two renames.
     pub fn swap_temp(&self) -> PathBuf {
         self.root.join(SWAP_TEMP_NAME)
+    }
+    /// Where a swap parks a `packages/` directory between two renames.
+    pub fn packages_swap_temp(&self) -> PathBuf {
+        self.root.join(PACKAGES_SWAP_TEMP_NAME)
     }
     /// Which directory carries the state file.
     pub fn locate(&self) -> Result<Located> {
@@ -247,6 +263,8 @@ fn iso8601(secs: u64) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwapReport {
     pub steps: Vec<String>,
+    /// How the Codex installs (`packages/`) were handled, when there were any.
+    pub notes: Vec<String>,
 }
 
 /// Make `~/.codex` the dedicated home (and park the original at
@@ -280,24 +298,29 @@ pub fn unoverride_homes(homes: &Homes) -> Result<SwapReport> {
 }
 
 /// Exchanges the names `~/.codex` and `~/.codex-copilot`. When only one of
-/// them exists (no regular Codex home to park), it is a single rename.
+/// them exists (no regular Codex home to park), it is a single rename. Then
+/// the Codex installs in `packages/` are put back where their links lead
+/// (see [`packages_steps`]).
 fn swap(homes: &Homes) -> Result<SwapReport> {
     let (codex, copilot, temp) = (homes.codex(), homes.copilot(), homes.swap_temp());
-    if present(&temp)? {
-        bail!(
-            "{} exists, probably left by an interrupted override or unoverride; check which \
-             directory is which, rename it by hand, then retry",
-            temp.display()
-        );
+    for temp in [&temp, &homes.packages_swap_temp()] {
+        if present(temp)? {
+            bail!(
+                "{} exists, probably left by an interrupted override or unoverride; check which \
+                 directory is which, rename it by hand, then retry",
+                temp.display()
+            );
+        }
     }
-    let renames = match (present(&codex)?, present(&copilot)?) {
+    let (codex_there, copilot_there) = (present(&codex)?, present(&copilot)?);
+    let mut steps = match (codex_there, copilot_there) {
         (true, true) => vec![
-            (codex.clone(), temp.clone()),
-            (copilot.clone(), codex),
-            (temp, copilot),
+            Step::Rename(codex.clone(), temp.clone()),
+            Step::Rename(copilot.clone(), codex),
+            Step::Rename(temp, copilot),
         ],
-        (true, false) => vec![(codex, copilot)],
-        (false, true) => vec![(copilot, codex)],
+        (true, false) => vec![Step::Rename(codex, copilot)],
+        (false, true) => vec![Step::Rename(copilot, codex)],
         // `locate` just found the state file in one of them.
         (false, false) => bail!(
             "neither {} nor {} exists",
@@ -305,7 +328,167 @@ fn swap(homes: &Homes) -> Result<SwapReport> {
             copilot.display()
         ),
     };
-    run_renames(&renames)
+    let (packages, notes) = packages_steps(homes, codex_there, copilot_there)?;
+    steps.extend(packages);
+    let steps = run_steps(&steps)?;
+    Ok(SwapReport { steps, notes })
+}
+
+/// The steps that follow the directory renames of a swap, plus notes saying
+/// what they do.
+///
+/// `packages/` is Codex's own installation, not part of either identity: the
+/// standalone installers (`install.sh`, `install.ps1`) put the releases in
+/// `$CODEX_HOME/packages/standalone`, and the app server daemon's in
+/// `$CODEX_HOME/packages/app-server-daemon`, then point absolute symlinks
+/// (junctions on Windows) into it: `packages/standalone/current`, and the
+/// `codex` command itself (`~/.local/bin/codex`,
+/// `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`). Moved with its home, such a
+/// tree leaves every one of those links dangling, `codex` included.
+///
+/// So each `packages/` stays at the path it was installed under: after the
+/// homes swap names, the two `packages/` directories swap back (or the one
+/// there is moves back, into an empty directory created for it when its home
+/// went away entirely). The exception is a tree whose `current` links all
+/// lead into the *other* home, as left by codex-copilot 2.0.0 and 2.0.1,
+/// which moved `packages/` with its home: when every tree there is such a
+/// leftover, the swap carries them to the path their links name instead.
+///
+/// `codex_there` / `copilot_there`: whether `~/.codex` / `~/.codex-copilot`
+/// exist before the swap.
+fn packages_steps(
+    homes: &Homes,
+    codex_there: bool,
+    copilot_there: bool,
+) -> Result<(Vec<Step>, Vec<String>)> {
+    let (codex, copilot) = (homes.codex(), homes.copilot());
+    let (codex_pkg, copilot_pkg) = (codex.join(PACKAGES_DIR), copilot.join(PACKAGES_DIR));
+    let at_codex = codex_there && present(&codex_pkg)?;
+    let at_copilot = copilot_there && present(&copilot_pkg)?;
+    if !at_codex && !at_copilot {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let leftover_at_codex = at_codex && installed_for(&codex_pkg, &copilot);
+    let leftover_at_copilot = at_copilot && installed_for(&copilot_pkg, &codex);
+    if (!at_codex || leftover_at_codex) && (!at_copilot || leftover_at_copilot) {
+        // Moving with their homes takes them to where their links lead.
+        let went = |from: &Path, to: &Path| {
+            format!(
+                "{} went with its directory to {}, where its links already led (an earlier \
+                 codex-copilot had moved it away)",
+                from.display(),
+                to.display()
+            )
+        };
+        let mut notes = Vec::new();
+        if at_codex {
+            notes.push(went(&codex_pkg, &copilot_pkg));
+        }
+        if at_copilot {
+            notes.push(went(&copilot_pkg, &codex_pkg));
+        }
+        return Ok((Vec::new(), notes));
+    }
+
+    // After the directory renames, the tree from `~/.codex` sits under
+    // `~/.codex-copilot` and the other way round.
+    let mut steps = Vec::new();
+    match (at_codex, at_copilot) {
+        (true, true) => {
+            let temp = homes.packages_swap_temp();
+            steps.push(Step::Rename(codex_pkg.clone(), temp.clone()));
+            steps.push(Step::Rename(copilot_pkg.clone(), codex_pkg.clone()));
+            steps.push(Step::Rename(temp, copilot_pkg.clone()));
+        }
+        (true, false) => {
+            // A lone ~/.codex was renamed away: recreate it to hold the tree.
+            if !copilot_there {
+                steps.push(Step::CreateDir(codex.clone()));
+            }
+            steps.push(Step::Rename(copilot_pkg.clone(), codex_pkg.clone()));
+        }
+        (false, true) => {
+            if !codex_there {
+                steps.push(Step::CreateDir(copilot.clone()));
+            }
+            steps.push(Step::Rename(codex_pkg.clone(), copilot_pkg.clone()));
+        }
+        (false, false) => unreachable!("returned above"),
+    }
+    let kept: Vec<String> = [(at_codex, &codex_pkg), (at_copilot, &copilot_pkg)]
+        .into_iter()
+        .filter(|(there, _)| *there)
+        .map(|(_, path)| path.display().to_string())
+        .collect();
+    let notes = vec![format!(
+        "{} stayed where {} (the Codex installation the `codex` command links into, not part \
+         of either home)",
+        kept.join(" and "),
+        if kept.len() == 1 {
+            "it was"
+        } else {
+            "they were"
+        }
+    )];
+    Ok((steps, notes))
+}
+
+/// Whether the Codex installation in `packages` was made for `home`: it has
+/// at least one `<package>/current` link, and every one of them leads into
+/// `home`'s `packages/`. Unreadable means no.
+fn installed_for(packages: &Path, home: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(packages) else {
+        return false;
+    };
+    let target_dir = home.join(PACKAGES_DIR);
+    let mut found = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let current = entry.path().join("current");
+        match fs::read_link(&current) {
+            Ok(target) if leads_into(&target, &target_dir) => found = true,
+            Ok(_) => return false,
+            // Not a link, or no `current` at all: nothing to go by.
+            Err(_) => {}
+        }
+    }
+    found
+}
+
+/// Whether the absolute link target `target` names something inside `dir`,
+/// compared as text: the target may well not exist.
+fn leads_into(target: &Path, dir: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        // A junction reads back as `\\?\C:\...`; compare case-insensitively
+        // without that prefix, the way Windows resolves the names.
+        let plain = |path: &Path| {
+            let text = path.to_string_lossy().replace('/', "\\").to_lowercase();
+            let text = match text.strip_prefix(r"\\?\") {
+                Some(rest) if !rest.starts_with("unc\\") => rest.to_string(),
+                _ => text,
+            };
+            text.trim_end_matches('\\').to_string()
+        };
+        let (target, dir) = (plain(target), plain(dir));
+        target == dir || target.starts_with(&format!("{dir}\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        target.starts_with(dir)
+    }
+}
+
+/// Whether `dir` holds nothing, or nothing but `packages/` (what a swap
+/// leaves where there was no regular Codex home, only a Codex install).
+pub fn holds_only_packages(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .into_iter()
+            .all(|entry| entry.is_ok_and(|entry| entry.file_name() == PACKAGES_DIR))
+    })
 }
 
 /// `symlink_metadata`, not `exists`: a dangling symlink still occupies the
@@ -318,55 +501,92 @@ fn present(path: &Path) -> Result<bool> {
     }
 }
 
-/// Performs the renames in order. When one fails, the ones already done are
-/// undone in reverse, so a failed swap (typically Windows refusing to rename
-/// a directory with an open file) leaves both directories where they were.
-fn run_renames(renames: &[(PathBuf, PathBuf)]) -> Result<SwapReport> {
-    run_renames_with(renames, |from, to| fs::rename(from, to))
+/// One filesystem change of a swap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Step {
+    Rename(PathBuf, PathBuf),
+    /// Creates an empty directory.
+    CreateDir(PathBuf),
+    /// Removes an empty directory: only ever the undo of `CreateDir`.
+    RemoveDir(PathBuf),
 }
 
-/// [`run_renames`] over any rename function, so tests can fail chosen calls.
-fn run_renames_with(
-    renames: &[(PathBuf, PathBuf)],
-    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
-) -> Result<SwapReport> {
-    let mut steps = Vec::new();
-    for (done, (from, to)) in renames.iter().enumerate() {
-        if let Err(err) = rename(from, to) {
-            let failed = format!(
-                "could not rename {} -> {}: {err}",
-                from.display(),
-                to.display()
-            );
-            return Err(roll_back(&renames[..done], &failed, &mut rename));
+impl Step {
+    fn apply(&self) -> std::io::Result<()> {
+        match self {
+            Step::Rename(from, to) => fs::rename(from, to),
+            Step::CreateDir(path) => fs::create_dir(path),
+            Step::RemoveDir(path) => fs::remove_dir(path),
         }
-        steps.push(renamed(from, to));
     }
-    Ok(SwapReport { steps })
+
+    fn undo(&self) -> Step {
+        match self {
+            Step::Rename(from, to) => Step::Rename(to.clone(), from.clone()),
+            Step::CreateDir(path) => Step::RemoveDir(path.clone()),
+            Step::RemoveDir(path) => Step::CreateDir(path.clone()),
+        }
+    }
+
+    /// `rename a -> b`, for "could not ...".
+    fn attempt(&self) -> String {
+        match self {
+            Step::Rename(from, to) => format!("rename {} -> {}", from.display(), to.display()),
+            Step::CreateDir(path) => format!("create {}", path.display()),
+            Step::RemoveDir(path) => format!("remove {}", path.display()),
+        }
+    }
+
+    /// `renamed a -> b`, once done.
+    fn done(&self) -> String {
+        match self {
+            Step::Rename(from, to) => renamed(from, to),
+            Step::CreateDir(path) => format!("created {}", path.display()),
+            Step::RemoveDir(path) => format!("removed {}", path.display()),
+        }
+    }
+}
+
+/// Performs the steps in order. When one fails, the ones already done are
+/// undone in reverse, so a failed swap (typically Windows refusing to rename
+/// a directory with an open file) leaves both directories where they were.
+fn run_steps(steps: &[Step]) -> Result<Vec<String>> {
+    run_steps_with(steps, Step::apply)
+}
+
+/// [`run_steps`] over any step runner, so tests can fail chosen calls.
+fn run_steps_with(
+    steps: &[Step],
+    mut apply: impl FnMut(&Step) -> std::io::Result<()>,
+) -> Result<Vec<String>> {
+    let mut report = Vec::new();
+    for (done, step) in steps.iter().enumerate() {
+        if let Err(err) = apply(step) {
+            let failed = format!("could not {}: {err}", step.attempt());
+            return Err(roll_back(&steps[..done], &failed, &mut apply));
+        }
+        report.push(step.done());
+    }
+    Ok(report)
 }
 
 /// Undoes `done`, newest first, and stops at the first undo that fails: an
 /// earlier step's name is only free again once the later steps are undone,
 /// so carrying on could move a directory onto the wrong name. The error says
-/// exactly which renames are still in effect.
+/// exactly which steps are still in effect.
 fn roll_back(
-    done: &[(PathBuf, PathBuf)],
+    done: &[Step],
     failed: &str,
-    rename: &mut impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    apply: &mut impl FnMut(&Step) -> std::io::Result<()>,
 ) -> anyhow::Error {
     let mut undone = Vec::new();
-    for (index, (from, to)) in done.iter().enumerate().rev() {
-        if let Err(err) = rename(to, from) {
-            let in_effect: Vec<String> = done[..=index]
-                .iter()
-                .map(|(from, to)| renamed(from, to))
-                .collect();
+    for (index, step) in done.iter().enumerate().rev() {
+        if let Err(err) = apply(&step.undo()) {
+            let in_effect: Vec<String> = done[..=index].iter().map(Step::done).collect();
             return anyhow!(
-                "{failed}; undoing it failed as well (could not move {} back to {}: {err}), so \
-                 the rollback stopped there. Fix the directories by hand. Still in effect: {}. \
-                 Undone: {}.",
-                to.display(),
-                from.display(),
+                "{failed}; undoing it failed as well (could not {}: {err}), so the rollback \
+                 stopped there. Fix the directories by hand. Still in effect: {}. Undone: {}.",
+                step.undo().attempt(),
                 in_effect.join(", "),
                 if undone.is_empty() {
                     "none".to_owned()
@@ -375,7 +595,7 @@ fn roll_back(
                 }
             );
         }
-        undone.push(renamed(from, to));
+        undone.push(step.done());
     }
     anyhow!("{failed}; nothing was changed (is a program using one of the directories?)")
 }
@@ -708,9 +928,12 @@ mod tests {
         let b = dir.path().join("b");
         make_dir(&a, "a", false);
         let missing = dir.path().join("missing");
-        let err = run_renames(&[(a.clone(), b.clone()), (missing, a.clone())])
-            .unwrap_err()
-            .to_string();
+        let err = run_steps(&[
+            Step::Rename(a.clone(), b.clone()),
+            Step::Rename(missing, a.clone()),
+        ])
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("nothing was changed"), "{err}");
         assert_eq!(marker(&a), "a");
         assert!(!b.exists());
@@ -718,19 +941,19 @@ mod tests {
 
     /// Runs a real swap's three renames with the chosen calls failing
     /// (numbered from 0, undos included). Returns the error and the calls.
-    fn swap_failing(h: &Homes, fail: &[usize]) -> (String, Vec<(PathBuf, PathBuf)>) {
-        let renames = vec![
-            (h.codex(), h.swap_temp()),
-            (h.copilot(), h.codex()),
-            (h.swap_temp(), h.copilot()),
+    fn swap_failing(h: &Homes, fail: &[usize]) -> (String, Vec<Step>) {
+        let steps = vec![
+            Step::Rename(h.codex(), h.swap_temp()),
+            Step::Rename(h.copilot(), h.codex()),
+            Step::Rename(h.swap_temp(), h.copilot()),
         ];
         let mut calls = Vec::new();
-        let err = run_renames_with(&renames, |from, to| {
-            calls.push((from.to_path_buf(), to.to_path_buf()));
+        let err = run_steps_with(&steps, |step| {
+            calls.push(step.clone());
             if fail.contains(&(calls.len() - 1)) {
                 return Err(std::io::Error::other("in use"));
             }
-            fs::rename(from, to)
+            step.apply()
         })
         .unwrap_err()
         .to_string();
@@ -780,6 +1003,270 @@ mod tests {
         assert_eq!(marker(&h.swap_temp()), "original");
         assert_eq!(marker(&h.copilot()), "dedicated");
         assert!(!h.codex().exists());
+    }
+
+    /// A standalone Codex install under `home`, laid out like `install.sh`
+    /// leaves it: `packages/standalone/current` is an absolute link into
+    /// `installed_for`'s `packages/` (normally `home` itself). Also links
+    /// `bin/codex` at it, as `~/.local/bin/codex` is. Returns that link, or
+    /// `None` where links cannot be made.
+    fn standalone(root: &Path, home: &Path, installed_for: &Path, tag: &str) -> Option<PathBuf> {
+        let release = home
+            .join(PACKAGES_DIR)
+            .join("standalone")
+            .join("releases")
+            .join("0.164.0");
+        fs::create_dir_all(release.join("bin")).unwrap();
+        fs::write(release.join("bin").join("codex"), tag).unwrap();
+        let target = installed_for
+            .join(PACKAGES_DIR)
+            .join("standalone")
+            .join("releases")
+            .join("0.164.0");
+        let current = home.join(PACKAGES_DIR).join("standalone").join("current");
+        if !link_dir(&target, &current) {
+            return None;
+        }
+        let bin = root.join("bin").join(tag);
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        let visible = installed_for
+            .join(PACKAGES_DIR)
+            .join("standalone")
+            .join("current")
+            .join("bin");
+        link_dir(&visible, &bin).then_some(bin)
+    }
+
+    /// What the `codex` the link `bin` leads to says, if it resolves.
+    fn runs(bin: &Path) -> Option<String> {
+        fs::read_to_string(bin.join("codex")).ok()
+    }
+
+    #[test]
+    fn the_codex_install_stays_in_place_through_a_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = homes(dir.path());
+        make_dir(&h.codex(), "original", false);
+        make_dir(&h.copilot(), "dedicated", true);
+        let Some(bin) = standalone(dir.path(), &h.codex(), &h.codex(), "regular") else {
+            eprintln!("skipped: cannot link directories here");
+            return;
+        };
+        // An app-server daemon package as well, also under ~/.codex.
+        let daemon = h.codex().join(PACKAGES_DIR).join("app-server-daemon");
+        fs::create_dir_all(&daemon).unwrap();
+        fs::write(daemon.join("marker"), "daemon").unwrap();
+
+        let report = override_homes(&h).unwrap();
+        assert_eq!(marker(&h.codex()), "dedicated");
+        assert_eq!(marker(&h.copilot()), "original");
+        // The install did not move, so `codex` still runs.
+        assert_eq!(runs(&bin).as_deref(), Some("regular"));
+        assert_eq!(marker(&daemon), "daemon");
+        assert!(!h.copilot().join(PACKAGES_DIR).exists());
+        assert_eq!(
+            report.steps[3..],
+            [renamed(
+                &h.copilot().join(PACKAGES_DIR),
+                &h.codex().join(PACKAGES_DIR)
+            ),]
+        );
+        assert!(
+            report.notes[0].contains("stayed where it was"),
+            "{report:?}"
+        );
+
+        unoverride_homes(&h).unwrap();
+        assert_eq!(marker(&h.codex()), "original");
+        assert_eq!(marker(&h.copilot()), "dedicated");
+        assert_eq!(runs(&bin).as_deref(), Some("regular"));
+        assert!(!h.copilot().join(PACKAGES_DIR).exists());
+        assert!(!h.packages_swap_temp().exists());
+    }
+
+    #[test]
+    fn two_codex_installs_each_stay_at_their_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = homes(dir.path());
+        make_dir(&h.codex(), "original", false);
+        make_dir(&h.copilot(), "dedicated", true);
+        // A codex that updated itself under CODEX_HOME=~/.codex-copilot
+        // installs there and relinks the command into it.
+        let (Some(regular), Some(dedicated)) = (
+            standalone(dir.path(), &h.codex(), &h.codex(), "regular"),
+            standalone(dir.path(), &h.copilot(), &h.copilot(), "dedicated"),
+        ) else {
+            eprintln!("skipped: cannot link directories here");
+            return;
+        };
+
+        let report = override_homes(&h).unwrap();
+        assert_eq!(report.steps.len(), 6, "{report:?}");
+        assert!(
+            report.notes[0].contains("stayed where they were"),
+            "{report:?}"
+        );
+        assert_eq!(runs(&regular).as_deref(), Some("regular"));
+        assert_eq!(runs(&dedicated).as_deref(), Some("dedicated"));
+        assert_eq!(marker(&h.codex()), "dedicated");
+        assert!(!h.packages_swap_temp().exists());
+
+        unoverride_homes(&h).unwrap();
+        assert_eq!(runs(&regular).as_deref(), Some("regular"));
+        assert_eq!(runs(&dedicated).as_deref(), Some("dedicated"));
+        assert_eq!(marker(&h.codex()), "original");
+    }
+
+    #[test]
+    fn a_lone_home_leaves_its_codex_install_in_a_new_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = homes(dir.path());
+        make_dir(&h.copilot(), "dedicated", true);
+        override_homes(&h).unwrap();
+        // Codex installed after the override, into the only home there is.
+        let Some(bin) = standalone(dir.path(), &h.codex(), &h.codex(), "installed") else {
+            eprintln!("skipped: cannot link directories here");
+            return;
+        };
+
+        let report = unoverride_homes(&h).unwrap();
+        assert_eq!(
+            report.steps,
+            [
+                renamed(&h.codex(), &h.copilot()),
+                format!("created {}", h.codex().display()),
+                renamed(
+                    &h.copilot().join(PACKAGES_DIR),
+                    &h.codex().join(PACKAGES_DIR)
+                ),
+            ]
+        );
+        assert_eq!(h.locate().unwrap(), Located::Normal);
+        assert_eq!(runs(&bin).as_deref(), Some("installed"));
+        assert!(holds_only_packages(&h.codex()));
+        assert!(!holds_only_packages(&h.copilot()));
+
+        // And back: now a three-way swap, the install still in place.
+        override_homes(&h).unwrap();
+        assert_eq!(runs(&bin).as_deref(), Some("installed"));
+        assert_eq!(marker(&h.codex()), "dedicated");
+        assert!(holds_only_packages(&h.copilot()));
+        assert_eq!(fs::read_dir(h.copilot()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_failed_packages_step_undoes_the_whole_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = homes(dir.path());
+        make_dir(&h.codex(), "dedicated", true);
+        fs::create_dir_all(h.codex().join(PACKAGES_DIR)).unwrap();
+        let steps = packages_steps(&h, true, false).unwrap().0;
+        let mut all = vec![Step::Rename(h.codex(), h.copilot())];
+        all.extend(steps);
+        // Created ~/.codex, then failed to move the install back into it.
+        let err = run_steps_with(&all, |step| match step {
+            Step::Rename(from, _) if from.ends_with(PACKAGES_DIR) => {
+                Err(std::io::Error::other("in use"))
+            }
+            step => step.apply(),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nothing was changed"), "{err}");
+        assert_eq!(marker(&h.codex()), "dedicated");
+        assert!(h.codex().join(PACKAGES_DIR).is_dir());
+        assert!(!h.copilot().exists());
+    }
+
+    /// codex-copilot 2.0.1 moved `packages/` with its home. Its leftovers go
+    /// back to where their links lead.
+    #[test]
+    fn an_install_an_older_swap_moved_goes_back_where_it_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = homes(dir.path());
+        // Overridden by 2.0.1: the regular home, install included, is at
+        // ~/.codex-copilot, while its links still name ~/.codex.
+        make_dir(&h.codex(), "dedicated", true);
+        make_dir(&h.copilot(), "original", false);
+        let Some(bin) = standalone(dir.path(), &h.copilot(), &h.codex(), "regular") else {
+            eprintln!("skipped: cannot link directories here");
+            return;
+        };
+        assert_eq!(runs(&bin), None);
+
+        let report = unoverride_homes(&h).unwrap();
+        assert_eq!(report.steps.len(), 3, "{report:?}");
+        assert!(
+            report.notes[0].contains("went with its directory"),
+            "{report:?}"
+        );
+        assert_eq!(runs(&bin).as_deref(), Some("regular"));
+        assert_eq!(marker(&h.codex()), "original");
+
+        // From here on it stays put.
+        override_homes(&h).unwrap();
+        assert_eq!(runs(&bin).as_deref(), Some("regular"));
+    }
+
+    /// Reinstalled by hand after a 2.0.1 override: the fresh install under
+    /// ~/.codex works and stays; the stale copy is left where it is.
+    #[test]
+    fn a_working_install_wins_over_a_stale_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = homes(dir.path());
+        make_dir(&h.codex(), "dedicated", true);
+        make_dir(&h.copilot(), "original", false);
+        let (Some(fresh), Some(_)) = (
+            standalone(dir.path(), &h.codex(), &h.codex(), "fresh"),
+            standalone(dir.path(), &h.copilot(), &h.codex(), "stale"),
+        ) else {
+            eprintln!("skipped: cannot link directories here");
+            return;
+        };
+        assert_eq!(runs(&fresh).as_deref(), Some("fresh"));
+
+        unoverride_homes(&h).unwrap();
+        assert_eq!(runs(&fresh).as_deref(), Some("fresh"));
+        assert_eq!(marker(&h.codex()), "original");
+    }
+
+    #[test]
+    fn a_leftover_packages_swap_directory_blocks_a_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = homes(dir.path());
+        make_dir(&h.copilot(), "dedicated", true);
+        make_dir(&h.packages_swap_temp(), "leftover", false);
+        let err = override_homes(&h).unwrap_err().to_string();
+        assert!(err.contains(PACKAGES_SWAP_TEMP_NAME), "{err}");
+        assert_eq!(marker(&h.copilot()), "dedicated");
+    }
+
+    #[test]
+    fn link_targets_are_compared_by_component() {
+        let home = Path::new("/home/u/.codex/packages");
+        assert!(leads_into(
+            Path::new("/home/u/.codex/packages/standalone/releases/x"),
+            home
+        ));
+        assert!(!leads_into(
+            Path::new("/home/u/.codex-copilot/packages/standalone"),
+            home
+        ));
+        assert!(!leads_into(Path::new("/home/u/.codex/packagesx"), home));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junction_targets_match_without_their_prefix_or_case() {
+        let home = Path::new(r"C:\Users\u\.codex\packages");
+        assert!(leads_into(
+            Path::new(r"\\?\C:\Users\U\.Codex\packages\standalone\releases\x"),
+            home
+        ));
+        assert!(!leads_into(
+            Path::new(r"\\?\C:\Users\u\.codex-copilot\packages\standalone"),
+            home
+        ));
     }
 
     #[test]

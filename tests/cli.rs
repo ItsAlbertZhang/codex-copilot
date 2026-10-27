@@ -936,6 +936,127 @@ fn override_without_a_regular_home_is_a_single_rename() {
     assert!(!home.codex_home().exists());
 }
 
+/// A Codex installed the way the standalone `install.sh` does it: the
+/// release under `<codex_home>/packages/standalone/releases`, with
+/// `packages/standalone/current` and `~/.local/bin/codex` absolute links into
+/// it. Returns `~/.local/bin/codex`.
+#[cfg(unix)]
+fn standalone_codex(home: &Home, codex_home: &Path) -> PathBuf {
+    use std::os::unix::fs::symlink;
+    let standalone = codex_home.join("packages").join("standalone");
+    let release = standalone
+        .join("releases")
+        .join("0.160.0-x86_64-unknown-linux-musl");
+    fake_codex(&release.join("bin"));
+    let current = standalone.join("current");
+    symlink(&release, &current).unwrap();
+    let visible = home.root().join(".local").join("bin").join("codex");
+    fs::create_dir_all(visible.parent().unwrap()).unwrap();
+    symlink(current.join("bin").join("codex"), &visible).unwrap();
+    visible
+}
+
+/// `status` finding codex on its own, with `PATH` set to `path`.
+#[cfg(unix)]
+fn status_with_path(home: &Home, path: &Path) -> Run {
+    let mut cmd = home.bare_command(&["status"]);
+    cmd.env("PATH", path);
+    Run::from(cmd.output().unwrap())
+}
+
+/// The standalone installer links `codex` into `~/.codex/packages`, so the
+/// swap leaves that directory where it is.
+#[cfg(unix)]
+#[test]
+fn a_swap_leaves_a_standalone_codex_working() {
+    let stub = Stub::start(&[]);
+    let home = Home::new();
+    fs::create_dir_all(home.codex_home()).unwrap();
+    fs::write(home.codex_home().join("marker"), "regular").unwrap();
+    let codex = standalone_codex(&home, &home.codex_home());
+    home.install(&stub, &[]).ok();
+    // Not on PATH, as in a shell opened before the installer ran: found in
+    // its default place all the same.
+    let nowhere = home.root().join("empty-path");
+    fs::create_dir_all(&nowhere).unwrap();
+    status_with_path(&home, &nowhere)
+        .check("codex", "ok")
+        .has(&codex.display().to_string());
+
+    home.run(&["override", "--force"])
+        .ok()
+        .has("stayed where it was")
+        .has("your regular Codex home");
+    assert_eq!(marker(&home.copilot()), "regular");
+    assert!(home.codex_home().join("packages").is_dir());
+    assert!(!home.copilot().join("packages").exists());
+    assert!(fs::metadata(&codex).is_ok(), "the codex link broke");
+    status_with_path(&home, &nowhere)
+        .check("codex", "ok")
+        .has("override active");
+
+    home.run(&["unoverride", "--force"])
+        .ok()
+        .has("stayed where it was");
+    assert_eq!(marker(&home.codex_home()), "regular");
+    assert!(fs::metadata(&codex).is_ok(), "the codex link broke");
+    assert!(!home.copilot().join("packages").exists());
+}
+
+/// Installed after the override, into the only home there is: `unoverride`
+/// keeps a `~/.codex` for it.
+#[cfg(unix)]
+#[test]
+fn unoverride_keeps_a_codex_installed_while_overridden() {
+    let stub = Stub::start(&[]);
+    let home = Home::new();
+    home.install(&stub, &[]).ok();
+    home.run(&["override", "--force"]).ok();
+    let codex = standalone_codex(&home, &home.codex_home());
+
+    home.run(&["unoverride", "--force"])
+        .ok()
+        .has(&format!("created {}", home.codex_home().display()))
+        .has("only Codex's own installation");
+    assert!(fs::metadata(&codex).is_ok(), "the codex link broke");
+    assert!(home.state_path().exists());
+    assert!(!home.codex_home().join("codex-copilot.json").exists());
+}
+
+/// What an override by codex-copilot 2.0.1 left: the regular home's install
+/// moved to `~/.codex-copilot`, the `codex` command dangling.
+#[cfg(unix)]
+#[test]
+fn a_codex_link_broken_by_an_older_override_is_explained_and_repaired() {
+    let stub = Stub::start(&[]);
+    let home = Home::new();
+    fs::create_dir_all(home.codex_home()).unwrap();
+    fs::write(home.codex_home().join("marker"), "regular").unwrap();
+    let codex = standalone_codex(&home, &home.codex_home());
+    home.install(&stub, &[]).ok();
+    // The 2.0.1 override: a plain exchange of the two directories.
+    let temp = home.root().join("swap");
+    fs::rename(home.codex_home(), &temp).unwrap();
+    fs::rename(home.copilot(), home.codex_home()).unwrap();
+    fs::rename(&temp, home.copilot()).unwrap();
+    assert!(fs::metadata(&codex).is_err());
+
+    status_with_path(&home, codex.parent().unwrap())
+        .check("codex", "WARN")
+        .has(&format!("{} links to", codex.display()))
+        .has("does not exist")
+        .has("codex-copilot unoverride");
+
+    home.run(&["unoverride", "--force"])
+        .ok()
+        .has("went with its directory");
+    assert_eq!(marker(&home.codex_home()), "regular");
+    assert!(
+        fs::metadata(&codex).is_ok(),
+        "the codex link is still broken"
+    );
+}
+
 #[test]
 fn override_needs_an_install() {
     let home = Home::new();
@@ -1040,6 +1161,30 @@ fn uninstall_removes_the_state_and_purge_the_home() {
         .has("Deleted")
         .has("$null");
     assert!(!home.copilot().exists());
+}
+
+/// `packages/` is Codex's installation, not the home's: `--purge` keeps it.
+#[test]
+fn purge_keeps_a_codex_installation_in_the_home() {
+    let stub = Stub::start(&[]);
+    let home = Home::new();
+    home.install(&stub, &[]).ok();
+    let release = home.copilot().join("packages").join("standalone");
+    fs::create_dir_all(&release).unwrap();
+    fs::write(release.join("marker"), "install").unwrap();
+    fs::create_dir_all(home.copilot().join("sessions")).unwrap();
+
+    home.run(&["uninstall", "--purge", "--force"])
+        .ok()
+        .has("Deleted")
+        .has("Kept")
+        .has("Codex installation");
+    assert_eq!(marker(&release), "install");
+    let left: Vec<_> = fs::read_dir(home.copilot())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["packages"]);
 }
 
 /// `uninstall` only removes files: a running relay keeps running, and the
